@@ -618,8 +618,9 @@ class OsdPage(QWidget):
                                      position=corner, font_size=self.mh_size.value(),
                                      include_fps=self.mh_fps.isChecked(),
                                      hotkey_owner=self.mh_owner.currentData(),
-                                     start_hidden=mangohud.global_enabled() or self.mh_global.isChecked()
-                                     or not self.link.osd.get("enabled", True))
+                                     # follows the OSD on/off state: MangoHud re-applies no_display on every
+                                     # reload, so a forced "hidden" would hide the HUD mid-game on each change
+                                     start_hidden=not self.link.osd.get("enabled", True))
             mangohud.write_config(path, text)
         except (OSError, ValueError) as e:
             self.status.emit(f"MangoHud config not written: {e}")

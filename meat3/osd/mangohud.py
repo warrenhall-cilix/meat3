@@ -195,6 +195,8 @@ def generate(sensors: Iterable[dict], hotkey: str = "", osd_file: str = DEFAULT_
         "round_corners=6",
         "text_outline",
         "hud_compact",
+        "no_small_font",                      # custom_text/exec rows otherwise use the ~0.55x small font
+        f"font_size_text={int(font_size)}",
     ]
     if include_fps:
         lines += ["fps", "frametime=0"]
@@ -205,10 +207,33 @@ def generate(sensors: Iterable[dict], hotkey: str = "", osd_file: str = DEFAULT_
     elif hotkey_owner == "daemon":
         lines.append("control=mangohud")
     lines.append("")
-    for n, s in enumerate(sensors, start=1):
-        lines.append(f"custom_text={_clean(osd_label(s))}")
+    sensors = list(sensors)
+    labels = [osd_label(s) for s in sensors]
+    import re
+    multi_gpu = len({m.group(0) for lb in labels for m in [re.match(r"(?:AMD |NVIDIA )?GPU \d+", lb)] if m}) > 1
+    for n, (s, lb) in enumerate(zip(sensors, labels), start=1):
+        lines.append(f"custom_text={_clean(short_label(lb, keep_gpu_index=multi_gpu))}")
         lines.append(f"exec={exec_command(n, osd_file)}")
     return "\n".join(lines) + "\n"
+
+
+LABEL_MAX = 16      # MangoHud's label column; longer labels run into the value (seen in game at 28 px)
+_WORDS = [("Highest ", "Max "), ("Average ", "Avg "), ("Package ", "Pkg "), ("temperature", "temp"),
+          (" current", " amps"), ("active clock", "clock"), ("effective clock", "clock"),
+          ("Memory ", "Mem "), ("Junction", "Hotspot")]
+
+
+def short_label(label: str, keep_gpu_index: bool = False) -> str:
+    """'GPU 0 GPC (core) clock' -> 'GPU GPC clock': in-game labels must fit MangoHud's narrow column."""
+    import re
+    t = re.sub(r"\s*\([^)]*\)", "", label).strip()
+    t = re.sub(r"^(?:AMD |NVIDIA )?GPU (\d+) ", (r"GPU\1 " if keep_gpu_index else "GPU "), t)
+    for a, b in _WORDS:
+        if len(t) <= LABEL_MAX:
+            break
+        t = t.replace(a, b)
+    t = re.sub(r"\s+", " ", t)
+    return t if len(t) <= LABEL_MAX else t[:LABEL_MAX - 1].rstrip() + "."
 
 
 def write_config(path: str, text: str) -> Path:
@@ -224,6 +249,4 @@ def write_config(path: str, text: str) -> Path:
 def usage_text(config_path: str) -> str:
     return (f"Steam launch options:  MANGOHUD_CONFIGFILE={config_path} mangohud %command%\n"
             f"Terminal:              MANGOHUD_CONFIGFILE={config_path} mangohud <game>\n"
-            "Lutris/Heroic: enable MangoHud and add the MANGOHUD_CONFIGFILE env var.\n"
-            "Steam (pressure-vessel) games only see host /run if the daemon also mirrors osd.txt "
-            "into the user's home; set 'osd.txt path' accordingly.")
+            "Lutris/Heroic: enable MangoHud and add the MANGOHUD_CONFIGFILE env var.")

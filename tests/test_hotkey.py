@@ -40,6 +40,20 @@ class TestHotkey(unittest.TestCase):
         self.assertIn("background_alpha=1\n", M.generate([], background_alpha=1.7))
         self.assertNotIn("background_color", M.generate([]))
 
+    def test_short_labels_fit_mangohud(self):
+        cases = {"GPU 0 GPC (core) clock": "GPU GPC clock", "GPU 0 Board power (real, x1.5 shunt)": "GPU Board power",
+                 "GPU 0 Highest pin current": "GPU Max pin amps", "CPU Package power (RAPL)": "CPU Pkg power",
+                 "CPU Core 7 active clock": "CPU Core 7 clock", "AMD GPU 0 Junction (hotspot)": "GPU Junction"}
+        for full, short in cases.items():
+            self.assertEqual(M.short_label(full), short)
+        self.assertEqual(M.short_label("AMD GPU 1 Junction", keep_gpu_index=True), "GPU1 Junction")
+        for lb in ("A very long sensor label with no abbreviations at all", "CPU L3 hit rate"):
+            self.assertLessEqual(len(M.short_label(lb)), M.LABEL_MAX)
+        txt = M.generate([{"id": "a", "group": "GPU 0: x/Clocks", "label": "GPC (core) clock"}], font_size=28)
+        self.assertIn("custom_text=GPU GPC clock\n", txt)
+        self.assertIn("no_small_font\n", txt)
+        self.assertIn("font_size_text=28\n", txt)
+
     def test_global_mangohud(self):
         with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": d}):
             self.assertFalse(M.global_enabled())
