@@ -58,8 +58,11 @@ sudo rm -rf "$PREFIX"
 sudo mkdir -p "$PREFIX"
 sudo cp -r "$SRC/meat3" "$SRC/README.md" "$SRC/PROTOCOL.md" "$PREFIX/"
 sudo find "$PREFIX" -name "__pycache__" -prune -exec rm -rf {} +
-# --no-optional-locks: as root (the update button) describe --dirty would rewrite .git/index root-owned
-VER="$(git --no-optional-locks -c safe.directory="$SRC" -C "$SRC" describe --always --dirty 2>/dev/null || echo unknown)"
+# run git as the checkout's owner: as root (the update button) describe --dirty rewrites .git/index root-owned
+GIT=(git -C "$SRC")
+SRC_OWNER="$(stat -c %U "$SRC")"
+[[ $EUID -eq 0 && "$SRC_OWNER" != root ]] && GIT=(runuser -u "$SRC_OWNER" -- git -C "$SRC")
+VER="$("${GIT[@]}" describe --always --dirty 2>/dev/null || echo unknown)"
 echo "$VER" | sudo tee "$PREFIX/VERSION" >/dev/null
 if [[ -d "$SRC/.git" ]]; then                  # lets the GUI/TUI update button find this checkout
     echo "$SRC" | sudo tee "$PREFIX/SOURCE" >/dev/null
