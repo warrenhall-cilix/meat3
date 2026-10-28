@@ -21,7 +21,9 @@ from __future__ import annotations
 import argparse
 import collections
 import gzip
+import hashlib
 import hmac
+import ipaddress
 import json
 import math
 import os
@@ -52,7 +54,7 @@ HISTORY_MAX_S = 3600
 
 def web_config() -> dict:
     w = {"listen": "0.0.0.0", "port": 8733, "auth": True, "token_file": "/etc/meat3/web.token",
-         "history_s": 900, "cert": "", "key": "", "metrics_public": False}
+         "history_s": 900, "cert": "", "key": "", "metrics_public": False, "allowed_hosts": []}
     w.update(config.get().get("web") or {})
     return w
 
@@ -63,22 +65,36 @@ def _num(x):
     return x if not isinstance(x, float) or math.isfinite(x) else None
 
 
+def installed_version() -> str:
+    """git describe of the install (/opt/meat3/VERSION), read locally: asking the daemon's
+    update_status would make it contact GitHub on the web UI's behalf."""
+    try:
+        with open(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                               "VERSION")) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
 class Hub:
     """Polls the daemon and keeps the latest snapshot plus a value history per sensor."""
 
-    def __init__(self, sock_path: str, history_s: int = 900):
+    STALE_POLLS = 10            # daemon answering but its timestamp frozen this many polls = not live
+
+    def __init__(self, sock_path: str, history_s: int = 900, interval: float = 1.0):
         self.client = Client(sock_path)
         self.lock = threading.Lock()
         self.history_s = max(60, min(HISTORY_MAX_S, int(history_s)))
-        self.interval = 1.0
+        self.interval = max(0.5, float(interval))
         self.hello: dict = {}
-        self.update: dict = {}
+        self.version = installed_version()
         self.meta: dict = {"rev": "", "sensors": []}
         self.values: dict = {"connected": False, "error": "connecting…"}
         self.ts: collections.deque = collections.deque()
         self.hist: dict[str, collections.deque] = {}
         self._stop = threading.Event()
-        self._last_hello = self._last_update = 0.0
+        self._last_hello = 0.0
+        self._last_t, self._same_t = None, 0
 
     def start(self):
         threading.Thread(target=self._run, name="meat3-web-poll", daemon=True).start()
@@ -86,15 +102,24 @@ class Hub:
     def stop(self):
         self._stop.set()
 
+    def _disconnected(self, error: str):
+        with self.lock:
+            self.values = {**self.values, "connected": False, "error": error}
+
     def _run(self):
+        last_err = None
         while not self._stop.is_set():
             t0 = time.monotonic()
             try:
                 self.poll_once()
-            except (OSError, ValueError) as e:
+                last_err = None
+            except Exception as e:       # never let the poller die: /metrics would freeze as "up"
                 self.client.close()
-                with self.lock:
-                    self.values = {**self.values, "connected": False, "error": f"daemon: {e}"}
+                msg = f"daemon: {e}" if isinstance(e, (OSError, ValueError)) else f"poll failed: {e!r}"
+                if msg != last_err:
+                    print(f"meat3-web: {msg}", file=sys.stderr, flush=True)
+                    last_err = msg
+                self._disconnected(msg)
             self._stop.wait(max(0.2, self.interval - (time.monotonic() - t0)))
 
     def poll_once(self):
@@ -103,19 +128,21 @@ class Hub:
             h = self.client.call({"cmd": "hello"})
             self.hello = {k: h.get(k) for k in ("version", "host", "backends")}
             self._last_hello = now
-        if now - self._last_update > 60:
-            u = self.client.call({"cmd": "update_status"})
-            self.update = {"installed": u.get("installed"), "behind": u.get("behind")}
-            self._last_update = now
         snap = self.client.call({"cmd": "snapshot"})
         if not snap.get("ok"):
             raise ValueError(snap.get("msg") or "snapshot failed")
+        t = snap.get("t") or now
+        if t == self._last_t:
+            self._same_t += 1
+            if self._same_t >= self.STALE_POLLS:
+                self._disconnected("daemon answers but stopped updating its sensors")
+            return                        # nothing new: no duplicate history point
+        self._last_t, self._same_t = t, 0
         sensors = snap.get("sensors") or []
         order = [s["id"] for s in sensors]
         by_id = {s["id"]: s for s in sensors}
-        rev = format(hash(tuple(order)) & 0xFFFFFFFF, "08x")
-        poll_ms = snap.get("poll_ms")
-        self.interval = max(0.5, float(config.get().get("poll_interval_s", 1.0)))
+        meta_rows = [{k: s.get(k) for k in META_KEYS} for s in sensors]
+        rev = format(hash(json.dumps(meta_rows, sort_keys=True, default=str)) & 0xFFFFFFFF, "08x")
         overview = []
         for p, title in overview_devices(order, by_id):
             rows = []
@@ -130,11 +157,9 @@ class Hub:
                             severity(s)] for s in sensors}
         with self.lock:
             if rev != self.meta["rev"]:
-                self.meta = {"rev": rev, "sensors": [{k: s.get(k) for k in META_KEYS} for s in sensors]}
-            self.values = {"connected": True, "error": "", "t": snap.get("t") or now, "rev": rev,
-                           "poll_ms": poll_ms, "v": values, "overview": overview, **self.hello,
-                           "update": self.update}
-            t = snap.get("t") or now
+                self.meta = {"rev": rev, "sensors": meta_rows}
+            self.values = {"connected": True, "error": "", "t": t, "rev": rev, "poll_ms": snap.get("poll_ms"),
+                           "v": values, "overview": overview, **self.hello, "installed": self.version}
             self.ts.append(t)
             n = len(self.ts)
             for sid, row in values.items():
@@ -211,7 +236,7 @@ PROM_UNITS = {
     "°C": ("temperature_celsius", 1), "V": ("voltage_volts", 1), "mV": ("voltage_volts", 1e-3),
     "W": ("power_watts", 1), "A": ("current_amperes", 1), "mA": ("current_amperes", 1e-3),
     "MHz": ("frequency_hertz", 1e6), "GHz": ("frequency_hertz", 1e9), "RPM": ("fan_speed_rpm", 1),
-    "%": ("percent", 1), "MB/s": ("throughput_bytes_per_second", 1e6),
+    "%": ("percent", 1), "MB/s": ("throughput_bytes_per_second", 1e6), "MiB/s": ("throughput_bytes_per_second", 2 ** 20),
     "GB/s": ("throughput_bytes_per_second", 1e9), "MB": ("size_bytes", 1e6), "GB": ("size_bytes", 1e9),
     "TB": ("size_bytes", 1e12), "MiB": ("size_bytes", 2 ** 20), "GiB": ("size_bytes", 2 ** 30),
     "h": ("duration_seconds", 3600), "min": ("duration_seconds", 60), "s": ("duration_seconds", 1),
@@ -245,10 +270,10 @@ def prometheus_text(meta: dict, values: dict) -> str:
     up = 1 if values.get("connected") else 0
     out += ["# HELP meat3_up 1 when meat3-web is getting data from the meat3d daemon", "# TYPE meat3_up gauge",
             f"meat3_up {up}"]
-    host, ver = values.get("host") or socket.gethostname(), (values.get("update") or {}).get("installed") or ""
+    host, ver = values.get("host") or socket.gethostname(), values.get("installed") or ""
     out += ["# HELP meat3_info meat3 build and host", "# TYPE meat3_info gauge",
             f'meat3_info{{host="{_plabel(host)}",version="{_plabel(ver)}"}} 1']
-    if values.get("poll_ms") is not None:
+    if up and values.get("poll_ms") is not None:
         out += ["# HELP meat3_poll_duration_seconds time the daemon took for its last sensor poll",
                 "# TYPE meat3_poll_duration_seconds gauge", f"meat3_poll_duration_seconds {values['poll_ms'] / 1000:.6g}"]
     for fam in sorted(fams):
@@ -259,6 +284,40 @@ def prometheus_text(meta: dict, values: dict) -> str:
 
 
 # ----------------------------------------------------------------------------- HTTP
+def session_value(token: str) -> str:
+    """Cookie value: derived from the token, so a leaked cookie isn't the /metrics bearer secret.
+    Changing the token (meat3-web --gen-token) logs every browser out."""
+    return hmac.new(token.encode(), b"meat3-web session v1", hashlib.sha256).hexdigest()
+
+
+def host_allowed(host_header: str, extra: tuple = ()) -> bool:
+    """Without a login, only answer requests addressed to this machine (IP literal, localhost, its
+    own hostname or a configured name): a DNS-rebinding page uses its own domain name."""
+    host = (host_header or "").strip().lower()
+    if host.startswith("["):
+        host = host[1:host.find("]")] if "]" in host else host[1:]
+    elif host.count(":") == 1:
+        host = host.split(":", 1)[0]
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        pass
+    me = socket.gethostname().lower()
+    names = {"localhost", me, me.split(".", 1)[0], *(h.lower() for h in extra)}
+    short = host.split(".", 1)[0]
+    return host in names or (short in names and host.endswith((".local", ".lan", ".home", ".internal")))
+
+
+def accepts_gzip(header: str) -> bool:
+    for part in (header or "").lower().split(","):
+        enc, _, params = part.strip().partition(";")
+        if enc.strip() in ("gzip", "*"):
+            q = params.strip()
+            return not (q.startswith("q=") and q[2:].strip() in ("0", "0.0", "0.00", "0.000"))
+    return False
+
+
 LOGIN_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>meat³ login</title>
 <link rel="icon" href="/icon.svg"><link rel="stylesheet" href="/app.css"></head>
@@ -276,6 +335,8 @@ class Handler(BaseHTTPRequestHandler):
     token: Optional[str] = None
     secure = False
     metrics_public = False
+    allowed_hosts: tuple = ()
+    timeout = 20                             # per-connection socket timeout: idle clients can't hold threads
 
     def log_message(self, fmt, *args):       # quiet: no per-request lines in the journal
         pass
@@ -287,20 +348,22 @@ class Handler(BaseHTTPRequestHandler):
         auth = self.headers.get("Authorization") or ""
         if auth.startswith("Bearer ") and hmac.compare_digest(auth[7:].strip().encode(), self.token.encode()):
             return True                      # Prometheus: authorization.credentials(_file)
+        want = session_value(self.token).encode()
         for part in (self.headers.get("Cookie") or "").split(";"):
             k, _, v = part.strip().partition("=")
-            if k == COOKIE and hmac.compare_digest(v.encode(), self.token.encode()):
+            if k == COOKIE and hmac.compare_digest(v.encode(), want):
                 return True
         return False
 
     def _send(self, code: int, body: bytes, ctype: str, extra: Optional[dict] = None, cache: bool = False):
-        if len(body) > 1024 and "gzip" in (self.headers.get("Accept-Encoding") or ""):
+        if len(body) > 1024 and accepts_gzip(self.headers.get("Accept-Encoding")):
             body = gzip.compress(body, 5)
             extra = {**(extra or {}), "Content-Encoding": "gzip"}
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "max-age=300" if cache else "no-store")
+        self.send_header("Vary", "Accept-Encoding")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
@@ -327,15 +390,26 @@ class Handler(BaseHTTPRequestHandler):
 
     def _set_cookie_and_go_home(self):
         attrs = "; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000" + ("; Secure" if self.secure else "")
-        self._send(HTTPStatus.SEE_OTHER, b"", "text/plain", {"Location": "/", "Set-Cookie": f"{COOKIE}={self.token}{attrs}"})
+        self._send(HTTPStatus.SEE_OTHER, b"", "text/plain", {"Location": "/", "Set-Cookie": f"{COOKIE}={session_value(self.token)}{attrs}"})
 
     # -- verbs
     def do_HEAD(self):
         self.do_GET()
 
+    def _host_check(self, path: str) -> bool:
+        """False (and a 421 sent) for a foreign Host when the request isn't protected by the token."""
+        unprotected = self.token is None or (path == "/metrics" and self.metrics_public and not self._authed())
+        if unprotected and not host_allowed(self.headers.get("Host", ""), self.allowed_hosts):
+            self._send(421, b"unknown host name; add it to web.allowed_hosts in /etc/meat3/config.json\n",
+                       "text/plain")
+            return False
+        return True
+
     def do_GET(self):
         url = urlsplit(self.path)
         path, q = url.path, parse_qs(url.query)
+        if not self._host_check(path):
+            return
         if path == "/icon.svg":
             try:
                 with open(ICON, "rb") as f:
@@ -392,7 +466,12 @@ class Handler(BaseHTTPRequestHandler):
         # the only POST is the login form; nothing in the web UI changes the machine
         if urlsplit(self.path).path != "/login" or self.token is None:
             return self._send(405, b"read-only", "text/plain", {"Allow": "GET, HEAD"})
-        n = min(int(self.headers.get("Content-Length") or 0), 4096)
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = -1
+        if not 0 <= n <= 4096:
+            return self._send(413 if n > 4096 else 400, b"bad request body", "text/plain", {"Connection": "close"})
         form = parse_qs(self.rfile.read(n).decode("utf-8", "replace"))
         if self._login_ok((form.get("token") or [""])[0]):
             return self._set_cookie_and_go_home()
@@ -416,22 +495,40 @@ def _esc(s: str) -> str:
 class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+    ssl_ctx: Optional[ssl.SSLContext] = None
 
     def __init__(self, addr, handler):
         if ":" in addr[0]:
             self.address_family = socket.AF_INET6
         super().__init__(addr, handler)
 
+    def finish_request(self, request, client_address):
+        # TLS handshake here, in the connection's own thread with a timeout: wrapping the listening
+        # socket would run it inside accept(), where one silent client blocks everyone
+        if self.ssl_ctx is not None:
+            request.settimeout(Handler.timeout)
+            try:
+                tls = self.ssl_ctx.wrap_socket(request, server_side=True)
+            except (OSError, ssl.SSLError):
+                return
+            try:
+                super().finish_request(tls, client_address)
+            finally:
+                tls.close()                  # shutdown_request() only closes the raw socket
+            return
+        super().finish_request(request, client_address)
 
-def make_server(hub: Hub, listen: str, port: int, token: Optional[str],
-                cert: str = "", key: str = "", metrics_public: bool = False) -> Server:
+
+def make_server(hub: Hub, listen: str, port: int, token: Optional[str], cert: str = "", key: str = "",
+                metrics_public: bool = False, allowed_hosts=()) -> Server:
     handler = type("BoundHandler", (Handler,), {"hub": hub, "token": token, "secure": bool(cert),
-                                                "metrics_public": metrics_public})
+                                                "metrics_public": metrics_public,
+                                                "allowed_hosts": tuple(allowed_hosts or ())})
     srv = Server((listen, port), handler)
     if cert:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(cert, key or None)
-        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+        srv.ssl_ctx = ctx
     return srv
 
 
@@ -449,7 +546,11 @@ def main(argv=None) -> int:
     scheme = "https" if w.get("cert") else "http"
 
     if args.gen_token:
-        gen_token(args.token_file)
+        try:
+            gen_token(args.token_file)
+        except (OSError, ValueError) as e:
+            print(f"meat3-web: {e} (delete the file to make a new token)", file=sys.stderr)
+            return 1
         print(f"token in {args.token_file}")
         return 0
     if args.url:
@@ -458,7 +559,8 @@ def main(argv=None) -> int:
         except (OSError, ValueError) as e:
             print(f"meat3-web: can't read the token ({e}); try sudo", file=sys.stderr)
             return 1
-        for ip in host_ips():
+        local = args.listen in ("127.0.0.1", "::1", "localhost")
+        for ip in (["localhost"] if local else host_ips()):
             print(f"{scheme}://{ip}:{args.port}/login?token={tok}")
         return 0
 
@@ -469,11 +571,16 @@ def main(argv=None) -> int:
         except (OSError, ValueError) as e:
             print(f"meat3-web: no login token ({e}). Run: sudo meat3-web --gen-token", file=sys.stderr)
             return 1
-    hub = Hub(args.socket, w.get("history_s", 900))
+    try:
+        interval = float(config.get().get("poll_interval_s") or 1.0)
+    except (TypeError, ValueError):
+        interval = 1.0
+    hub = Hub(args.socket, w.get("history_s", 900), interval)
     hub.start()
     srv = make_server(hub, args.listen, args.port, token, w.get("cert", ""), w.get("key", ""),
-                      bool(w.get("metrics_public", False)))
-    print(f"meat3-web: {scheme}://{args.listen}:{args.port}/ (read-only; "
+                      bool(w.get("metrics_public", False)), w.get("allowed_hosts") or ())
+    shown = f"[{args.listen}]" if ":" in args.listen else args.listen
+    print(f"meat3-web: {scheme}://{shown}:{args.port}/ (read-only; "
           f"{'token login' if token else 'NO login'}; daemon {args.socket})", flush=True)
     try:
         srv.serve_forever()

@@ -17,44 +17,49 @@ sys.path.insert(0, str(ROOT))
 from meat3.web import server as web  # noqa: E402
 
 TOKEN = "test-token-0123456789abcdef"
+SENT: list = []                       # every daemon command the web server sends during these tests
+_orig_call = web.Client.call
+
+
+def _recording_call(self, req):
+    SENT.append(req.get("cmd"))
+    return _orig_call(self, req)
+
+
+def wait_for(cond, timeout=15, msg="timed out"):
+    t0 = time.monotonic()
+    while not cond():
+        assert time.monotonic() - t0 < timeout, msg
+        time.sleep(0.05)
 
 
 class TestWeb(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = Path(tempfile.mkdtemp(prefix="meat3-web-"))
-        sock = str(cls.tmp / "mock.sock")
+        cls.addClassCleanup(shutil.rmtree, cls.tmp, ignore_errors=True)
+        cls.sock = sock = str(cls.tmp / "mock.sock")
         cls.mock = subprocess.Popen([sys.executable, "-m", "meat3.core.mockd", "--socket", sock,
                                      "--osd-file", str(cls.tmp / "osd.txt"), "--rate", "0.5"],
                                     cwd=str(ROOT), stdout=subprocess.DEVNULL)
-        t0 = time.monotonic()
-        while not os.path.exists(sock):
-            assert time.monotonic() - t0 < 10, "mockd did not start"
-            time.sleep(0.05)
-        cls.hub = web.Hub(sock, 120)
-        cls.hub.interval = 0.3
+        cls.addClassCleanup(lambda: (cls.mock.terminate(), cls.mock.wait(5)))
+        wait_for(lambda: os.path.exists(sock), 10, "mockd did not start")
+        web.Client.call = _recording_call
+        cls.addClassCleanup(setattr, web.Client, "call", _orig_call)
+        cls.hub = web.Hub(sock, 120, interval=0.3)
         cls.hub.start()
+        cls.addClassCleanup(lambda: (cls.hub.stop(), cls.hub.client.close()))
         cls.srv = web.make_server(cls.hub, "127.0.0.1", 0, TOKEN)
         cls.port = cls.srv.server_address[1]
         threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
-        t0 = time.monotonic()
-        while len(cls.hub.ts) < 3:
-            assert time.monotonic() - t0 < 15, "web hub got no snapshots"
-            time.sleep(0.1)
+        cls.addClassCleanup(lambda: (cls.srv.shutdown(), cls.srv.server_close()))
+        wait_for(lambda: len(cls.hub.ts) >= 3, 15, "web hub got no snapshots")
 
-    @classmethod
-    def tearDownClass(cls):
-        cls.srv.shutdown()
-        cls.hub.stop()
-        cls.mock.terminate()
-        cls.mock.wait(5)
-        shutil.rmtree(cls.tmp, ignore_errors=True)
-
-    def req(self, method, path, cookie=True, body=None, headers=None):
-        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+    def req(self, method, path, cookie=True, body=None, headers=None, port=None):
+        c = http.client.HTTPConnection("127.0.0.1", port or self.port, timeout=5)
         h = dict(headers or {})
         if cookie:
-            h["Cookie"] = f"{web.COOKIE}={TOKEN}"
+            h["Cookie"] = f"{web.COOKIE}={web.session_value(TOKEN)}"
         c.request(method, path, body=body, headers=h)
         r = c.getresponse()
         data = r.read()
@@ -71,12 +76,15 @@ class TestWeb(unittest.TestCase):
         self.assertEqual(r.status, 401)
         r, _ = self.req("GET", "/api/values", cookie=False, headers={"Cookie": f"{web.COOKIE}=wrong"})
         self.assertEqual(r.status, 401)
+        r, _ = self.req("GET", "/api/values", cookie=False, headers={"Cookie": f"{web.COOKIE}={TOKEN}"})
+        self.assertEqual(r.status, 401)                   # the raw token is not a session cookie
 
     def test_login_sets_cookie(self):
         r, _ = self.req("GET", f"/login?token={TOKEN}", cookie=False)
         self.assertEqual(r.status, 303)
         ck = r.getheader("Set-Cookie")
-        self.assertIn(f"{web.COOKIE}={TOKEN}", ck)
+        self.assertIn(f"{web.COOKIE}={web.session_value(TOKEN)}", ck)
+        self.assertNotIn(TOKEN, ck)                       # cookie isn't the bearer secret
         self.assertIn("HttpOnly", ck)
         self.assertIn("SameSite=Strict", ck)
         r, _ = self.req("POST", "/login", cookie=False, body=f"token={TOKEN}",
@@ -91,9 +99,90 @@ class TestWeb(unittest.TestCase):
         for path in ("/api/apply", "/api/values", "/api/osd", "/api/update_start"):
             r, _ = self.req("POST", path, body="{}")
             self.assertEqual(r.status, 405, path)
-        src = Path(web.__file__).read_text()
-        for cmd in ("apply", "osd_set", "osd_toggle", "reset_stats", "update_start", "update_check"):
-            self.assertNotIn(f'"cmd": "{cmd}"', src, cmd)
+        for path in ("/", "/api/meta", "/api/values", "/api/history?ids=nv0.clk.gpc", "/metrics"):
+            self.req("GET", path, headers={"Authorization": f"Bearer {TOKEN}"})
+        self.assertTrue(SENT)
+        self.assertEqual(set(SENT), {"hello", "snapshot"})   # only reads; not even update_status
+
+    def test_bad_request_bodies(self):
+        for cl, code in (("-1", 400), ("abc", 400), ("99999", 413)):
+            c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+            c.putrequest("POST", "/login")
+            c.putheader("Content-Length", cl)
+            c.endheaders()
+            r = c.getresponse()
+            self.assertEqual(r.status, code, cl)
+            c.close()
+
+    def test_host_check_without_login(self):
+        srv = web.make_server(self.hub, "127.0.0.1", 0, None)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            port = srv.server_address[1]
+            r, _ = self.req("GET", "/api/values", cookie=False, port=port, headers={"Host": "evil.example:8733"})
+            self.assertEqual(r.status, 421)                  # DNS rebinding name
+            for host in (f"127.0.0.1:{port}", "localhost", "[::1]:8733", web.socket.gethostname()):
+                r, _ = self.req("GET", "/api/values", cookie=False, port=port, headers={"Host": host})
+                self.assertEqual(r.status, 200, host)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        me = web.socket.gethostname().split(".")[0]
+        self.assertTrue(web.host_allowed(f"{me}.lan:8733"))
+        self.assertFalse(web.host_allowed("evil.lan"))
+        self.assertTrue(web.host_allowed("grafana.home.arpa", ("grafana.home.arpa",)))
+
+    def test_accepts_gzip(self):
+        self.assertTrue(web.accepts_gzip("gzip, deflate, br"))
+        self.assertFalse(web.accepts_gzip("gzip;q=0, deflate"))
+        self.assertFalse(web.accepts_gzip(""))
+
+    def test_tls_idle_client_does_not_block(self):
+        import ssl
+        if not shutil.which("openssl"):
+            self.skipTest("openssl not installed")
+        cert, key = str(self.tmp / "c.pem"), str(self.tmp / "k.pem")
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert,
+                        "-days", "1", "-subj", "/CN=localhost"], check=True, capture_output=True)
+        srv = web.make_server(self.hub, "127.0.0.1", 0, TOKEN, cert, key)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        idle = web.socket.create_connection(("127.0.0.1", srv.server_address[1]))   # says nothing
+        try:
+            ctx = ssl._create_unverified_context()
+            c = http.client.HTTPSConnection("127.0.0.1", srv.server_address[1], timeout=4, context=ctx)
+            c.request("GET", "/metrics", headers={"Authorization": f"Bearer {TOKEN}"})
+            self.assertEqual(c.getresponse().status, 200)
+            c.close()
+        finally:
+            idle.close()
+            srv.shutdown()
+            srv.server_close()
+
+    def test_poller_survives_errors_and_detects_stale_daemon(self):
+        hub = web.Hub(self.sock, 120, interval=0.5)
+        boom = {"n": 0}
+
+        def bad_poll():
+            boom["n"] += 1
+            raise TypeError("unexpected")
+        hub.poll_once = bad_poll
+        hub.start()
+        try:
+            wait_for(lambda: boom["n"] >= 2, 5, "poller died after the first error")
+            self.assertFalse(hub.values["connected"])
+            self.assertIn("TypeError", hub.values["error"])
+        finally:
+            hub.stop()
+            hub.client.close()
+        hub = web.Hub(self.sock, 120)
+        frozen = {"ok": True, "t": 123.0, "sensors": [{"id": "a", "value": 1.0}]}
+        hub.client.call = lambda req: {"ok": True} if req["cmd"] == "hello" else frozen
+        hub.poll_once()
+        self.assertTrue(hub.values["connected"])
+        for _ in range(hub.STALE_POLLS):
+            hub.poll_once()
+        self.assertFalse(hub.values["connected"])
+        self.assertEqual(len(hub.ts), 1)                    # no duplicate history points
 
     def test_meta_values_history(self):
         r, body = self.req("GET", "/api/meta")
@@ -168,7 +257,7 @@ class TestWeb(unittest.TestCase):
         a = web.gen_token(p)
         self.assertGreaterEqual(len(a), 24)
         self.assertEqual(web.gen_token(p), a)              # kept, not regenerated
-        self.assertEqual(os.stat(p).st_mode & 0o777, 0o640)
+        self.assertEqual(os.stat(p).st_mode & 0o007, 0)     # never world-readable
         self.assertEqual(web.read_token(p), a)
 
 

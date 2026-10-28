@@ -538,8 +538,8 @@ class MockRyzen9800X3D(MockBackend):
               "game: Cyberpunk2077.exe (Steam app 1091500)"),
             S("L3 by app", f"{P}.l3.reserve.active",
               "L3 reservation: " + ("active for Cyberpunk2077.exe" if res else "off"), 1.0 if res else 0.0, "", 0),
-            S("L3 by app", f"{P}.l3.reserve.game_mb", "L3 reserved for game", 96 - bg_mb if res else None, "MB", 0),
-            S("L3 by app", f"{P}.l3.reserve.bg_mb", "L3 limit for everything else", bg_mb if res else None, "MB", 0),
+            S("L3 by app", f"{P}.l3.reserve.game_mb", "L3 reserved for game", 96 - bg_mb if res else None, "MiB", 0),
+            S("L3 by app", f"{P}.l3.reserve.bg_mb", "L3 limit for everything else", bg_mb if res else None, "MiB", 0),
         ]
         out.append(S("Pipeline by app", f"{P}.pipe.app_cost", "Per-app counting cost (estimate)",
                      0.4 * load + abs(n(0.02)), "%", 2))

@@ -18,8 +18,6 @@ from __future__ import annotations
 import os
 import re
 import time
-from typing import Optional
-
 from meat3.core.model import Backend, Sensor
 from meat3.backends._cpu_common import (_listdir, hwmon_channels, read_hwmon_value, read_int, read_str, slug)
 from meat3.backends import board_maps
@@ -144,7 +142,7 @@ class BoardBackend(Backend):
             hint_base = f"hwmon {c['name']} ({c['hwmon']})"
             entry = c["map"]
             if entry:
-                hint_base += f"; names from the {entry['name']} map" + (" (vendor default, checked per rail)" if entry.get("guess") else "")
+                hint_base += f"; names from the {entry['name']} map" + (" (vendor default; +12V/+5V/+3.3V/battery rails are range-checked)" if entry.get("guess") else "")
             for ch in c["chans"]:
                 drv = ch["label"] if ch["label"] != ch["key"] else None
                 d = board_maps.describe(c["name"], ch["key"], drv, entry)

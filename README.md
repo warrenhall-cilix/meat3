@@ -138,7 +138,7 @@ Keys: `Tab` cycles views, `o` toggles the OSD, `r` resets stats, `u` checks for 
 A browser view for headless machines such as Proxmox hosts and servers, or for checking your PC from a phone. It has three tabs:
 - **Overview**: the same dashboard as the TUI.
 - **Sensors**: every sensor with min/max/avg, filterable.
-- **Graphs**: pin any sensor, with up to 15 minutes of history.
+- **Graphs**: pin any sensor, with up to 15 minutes of history (an hour with `history_s`).
 
 It **cannot change anything**: it has no overclocking, fan, OSD or update controls. The service runs as a throwaway system user that the daemon doesn't accept writes from.
 
@@ -152,11 +152,13 @@ sudo systemctl disable --now meat3-web       # turn it off again
 - **Settings:** in `/etc/meat3/config.json` under `"web"`:
   - `listen` (default `"0.0.0.0"`, or `"127.0.0.1"` for SSH tunnels only)
   - `port` (`8733`)
-  - `history_s` (`900`)
-  - `cert`/`key` (PEM paths to serve HTTPS)
+  - `history_s` (`900`, up to `3600`: how far back the graphs can go)
+  - `cert`/`key` (PEM paths to serve HTTPS). The service runs as a throwaway user in group `meat3` and can't see `/home`, so keep them in e.g. `/etc/meat3/` with the key `root:meat3` mode `0640`.
+  - `token_file` (`/etc/meat3/web.token`)
   - `auth` (`false` only behind your own authenticating proxy)
+  - `allowed_hosts` (`[]`): without a login (`auth: false` or `metrics_public`), requests must be addressed to an IP, `localhost` or this machine's hostname; add other DNS names here
 - **Security:** plain HTTP sends the token unencrypted, which is fine on a home LAN. Over anything else, use `cert`/`key`, a reverse proxy, or `ssh -L 8733:localhost:8733 host`.
-- **Headless installs:** use `meat3-tui` over SSH for everything else.
+- **Headless installs:** use `meat3-tui` over SSH for everything else. `--headless` is remembered by later installs and updates; `--desktop` undoes it. Debian/Proxmox needs `apt install git` first to clone.
 
 ### Prometheus + Grafana (many machines)
 
@@ -190,7 +192,7 @@ For Grafana, import `packaging/grafana/meat3-dashboard.json` (Dashboards → New
 - **Motherboard:** temperatures, fans, supply rails, and CPU/memory voltages.
 - **Storage:** temperatures, throughput, life remaining, total written, and media errors/unsafe shutdowns.
 
-Regenerate it with `tools/make_grafana_dashboard.py`. Debian/Proxmox needs `apt install git` first to clone.
+Regenerate it with `tools/make_grafana_dashboard.py`.
 
 ## RX 9070 / 9070 XT (RDNA4) extras
 

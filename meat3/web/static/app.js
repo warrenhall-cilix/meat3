@@ -1,4 +1,4 @@
-// meat³ web UI: read-only view of meat3d's sensors. Polls /api/values once per daemon poll.
+// meat³ web UI: read-only view of meat3d's sensors. Polls /api/values about once a second.
 "use strict";
 
 const NONE = "—";
@@ -69,10 +69,9 @@ function setStatus(d) {
   dot.className = "dot " + (d.connected ? "ok" : "bad");
   let txt = d.connected ? "live" : (d.error || "disconnected");
   if (d.connected && d.poll_ms != null) txt += " · poll " + Math.round(d.poll_ms) + " ms";
-  if (d.update && d.update.behind) txt += " · " + d.update.behind + " update" + (d.update.behind > 1 ? "s" : "") + " available";
   $("#status-text").textContent = txt;
   if (d.host) { $("#host").textContent = d.host; document.title = "meat³ · " + d.host; }
-  const ver = [d.version ? "protocol " + d.version : "", d.update && d.update.installed ? "meat³ " + d.update.installed : ""];
+  const ver = [d.installed ? "meat³ " + d.installed : "", d.version ? "protocol " + d.version : ""];
   $("#version").textContent = ver.filter(Boolean).join(" · ");
 }
 
@@ -82,6 +81,7 @@ async function loadMeta() {
   S.sensors = m.sensors || [];
   S.byId = Object.fromEntries(S.sensors.map((s) => [s.id, s]));
   $("#logout").hidden = !m.auth;
+  setWindows(m.history_s || 900);
   buildTable();
   S.ovKey = "";
   syncGraphs(true);
@@ -386,7 +386,7 @@ function draw(g) {
     ctx.fillText(fmt(v, Math.max(m.decimals | 0, span < 3 ? 2 : 0), m.unit), padL - 6, y);
   }
   ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
-  const step = S.win <= 60 ? 15 : S.win <= 300 ? 60 : S.win <= 600 ? 120 : 300;
+  const step = S.win <= 60 ? 15 : S.win <= 300 ? 60 : S.win <= 600 ? 120 : S.win <= 900 ? 300 : S.win <= 1800 ? 600 : 900;
   for (let s = 0; s <= S.win; s += step) {
     const x = padL + pw - (s / S.win) * pw;
     ctx.fillText(s === 0 ? "now" : "-" + (s >= 60 ? s / 60 + "m" : s + "s"), Math.min(Math.max(x, padL + 12), w - 14), h - 3);
@@ -429,6 +429,18 @@ function draw(g) {
   if (top < 0) top = py + 10;
   g.tip.style.left = Math.max(0, left) + "px";
   g.tip.style.top = Math.min(top, h - th) + "px";
+}
+
+// graph window choices: whatever the server keeps history for (web.history_s, up to 1 h)
+const WINDOWS = [[60, "1 min"], [300, "5 min"], [600, "10 min"], [900, "15 min"], [1800, "30 min"], [3600, "1 h"]];
+function setWindows(maxS) {
+  const sel = $("#window");
+  const opts = WINDOWS.filter(([s]) => s <= maxS);
+  if (sel.options.length === opts.length) return;
+  sel.replaceChildren(...opts.map(([s, label]) => { const o = el("option", null, label); o.value = String(s); return o; }));
+  if (S.win > opts[opts.length - 1][0]) { S.win = opts[opts.length - 1][0]; store.set("win", S.win); syncGraphs(true); }
+  sel.value = String(S.win);
+  if (!sel.value) { S.win = 600; sel.value = "600"; }
 }
 
 // ---------------------------------------------------------------- views

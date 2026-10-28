@@ -223,7 +223,7 @@ class NvidiaGPU(Backend):
         for sid, ctr, label in (("pcie.tx", N.NVML_PCIE_UTIL_TX_BYTES, "TX throughput"),
                                 ("pcie.rx", N.NVML_PCIE_UTIL_RX_BYTES, "RX throughput")):
             v = _try(N.nvmlDeviceGetPcieThroughput, h, ctr)
-            add(sid, "PCIe", label, v / 1024 if v is not None else None, "MB/s", 1)
+            add(sid, "PCIe", label, v / 1024 if v is not None else None, "MiB/s", 1)
 
         # fans
         for f in range(self.nfans):

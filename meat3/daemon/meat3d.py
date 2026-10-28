@@ -235,6 +235,9 @@ def peer_uid(sock) -> int:
 
 
 def peer_can_write(sock) -> bool:
+    # Only root, the peer's primary group, or a *named* member of group meat3. Supplementary groups
+    # deliberately don't count: meat3-web runs as a systemd DynamicUser with SupplementaryGroups=meat3
+    # so it can read the socket, and must never be able to write. Keep it that way.
     try:
         creds = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
         pid, uid, gid = struct.unpack("3i", creds)

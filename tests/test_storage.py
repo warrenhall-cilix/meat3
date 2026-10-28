@@ -50,6 +50,7 @@ class TestStorage(unittest.TestCase):
         ctl = os.path.join(pci, "nvme/nvme0")
         w(f"{ctl}/model", "KINGSTON SKC3000S1024G\n")
         w(f"{ctl}/firmware_rev", "EIFK31.6\n")
+        os.makedirs(f"{ctl}/nvme0n1")                 # namespace entry in the controller dir
         os.symlink(pci, f"{ctl}/device")
         for f, v in (("current_link_speed", "16.0 GT/s PCIe"), ("max_link_speed", "16.0 GT/s PCIe"),
                      ("current_link_width", "4"), ("max_link_width", "4")):
@@ -102,7 +103,7 @@ class TestStorage(unittest.TestCase):
 
     def backend(self, smart=smart_bytes()):
         return StorageBackend(sys_root=self.sys, dev_root="/dev", clock=self.clock,
-                              smart_reader=lambda dev: smart, smartctl=self.fake_smartctl)
+                              smart_reader=lambda dev: smart, smartctl=self.fake_smartctl, background=False)
 
     def sens(self, b):
         return {s.id: s for s in b.sensors()}
@@ -140,7 +141,8 @@ class TestStorage(unittest.TestCase):
         def reader(dev):
             n[0] += 1
             return smart_bytes()
-        b = StorageBackend(sys_root=self.sys, clock=self.clock, smart_reader=reader, smartctl=self.fake_smartctl)
+        b = StorageBackend(sys_root=self.sys, clock=self.clock, smart_reader=reader, smartctl=self.fake_smartctl,
+                           background=False)
         b.sensors(); self.clock.t += 5; b.sensors()
         self.assertEqual(n[0], 1)
         self.clock.t += 61; b.sensors()
@@ -159,16 +161,68 @@ class TestStorage(unittest.TestCase):
 
     def test_sata_and_usb(self):
         s = self.sens(self.backend())
-        self.assertEqual(s["storage.sda.t.temp1"].value, 35.0)                # SSD: drivetemp
-        self.assertEqual(s["storage.sda.smart.a177"].value, 97)               # normalised wear
-        self.assertTrue(s["storage.sda.t.temp1"].group.endswith("SATA sda: Samsung SSD 870 EVO 1TB"))
-        self.assertNotIn("storage.sdb.t.temp1", s)                            # HDD: no drivetemp read
-        self.assertEqual(s["storage.sdb.t.smart"].value, 38)
-        self.assertEqual(s["storage.sdb.smart.a5"].value, 8)
-        self.assertAlmostEqual(s["storage.sdb.smart.written"].value, 10.24)
-        self.assertNotIn("storage.sdc.smart.health", s)                       # USB: no SMART
-        self.assertIn("storage.sdc.io.read", s)
+        self.assertEqual(s["storage.ata1.t.temp1"].value, 35.0)                # SSD: drivetemp
+        self.assertEqual(s["storage.ata1.smart.a177"].value, 97)               # normalised wear
+        self.assertTrue(s["storage.ata1.t.temp1"].group.endswith("SATA sda: Samsung SSD 870 EVO 1TB"))
+        self.assertNotIn("storage.ata2.t.temp1", s)                            # HDD: no drivetemp read
+        self.assertEqual(s["storage.ata2.t.smart"].value, 38)
+        self.assertEqual(s["storage.ata2.smart.a5"].value, 8)
+        self.assertNotIn("storage.ata1.t.smart", s)                           # SSD has drivetemp
+        self.assertAlmostEqual(s["storage.ata2.smart.written"].value, 10.24)
+        self.assertNotIn("storage.usb_sdc.smart.health", s)                       # USB: no SMART
+        self.assertIn("storage.usb_sdc.io.read", s)
         self.assertNotIn("/dev/sdc", self.smartctl_calls)
+
+
+    def test_sata_ssd_without_drivetemp_uses_smartctl(self):
+        shutil.rmtree(os.path.join(os.path.realpath(os.path.join(self.sys, "block/sda/device")), "hwmon"))
+        orig = self.fake_smartctl
+        self.fake_smartctl = lambda dev: {**orig(dev), "temperature": {"current": 36}}
+        s = self.sens(self.backend())
+        self.assertEqual(s["storage.ata1.t.smart"].value, 36)
+
+    def test_background_worker_never_blocks_poll(self):
+        import threading
+        gate = threading.Event()
+
+        def slow_reader(dev):
+            gate.wait(5)                                # a drive taking ages to answer
+            return smart_bytes()
+        b = StorageBackend(sys_root=self.sys, clock=self.clock, smart_reader=slow_reader,
+                           smartctl=lambda dev: None, background=True)
+        import time as _t
+        t0 = _t.monotonic()
+        s = self.sens(b)
+        self.assertLess(_t.monotonic() - t0, 1.0)
+        self.assertIsNone(s["storage.nvme0.smart.used"].value)  # not read yet, row present
+        b.sensors()                                             # still running: not queued twice
+        gate.set()
+        b._worker.join(5)
+        self.assertEqual(self.sens(b)["storage.nvme0.smart.used"].value, 5)
+
+    def test_ioctl_status_means_no_data(self):
+        import fcntl as _f
+        from unittest import mock
+        with mock.patch.object(storage.os, "open", return_value=99), mock.patch.object(storage.os, "close"), \
+                mock.patch.object(_f, "ioctl", return_value=0x4002) as io:
+            self.assertIsNone(storage.nvme_get_smart_log("/dev/nvme0"))
+            cmd = io.call_args[0][2]
+            fields = storage._PASSTHRU.unpack(bytes(cmd))
+            self.assertEqual(fields[0], 0x02)                   # Get Log Page
+            self.assertEqual(fields[10], (127 << 16) | 0x02)    # NUMDL 127 (512 bytes), LID 02h
+            self.assertEqual(fields[16], 0)                     # driver default timeout
+
+    def test_hdd_attr_192_label(self):
+        orig = self.fake_smartctl
+
+        def sc(dev):
+            j = orig(dev)
+            j["ata_smart_attributes"]["table"].append({"id": 192, "name": "Power-Off_Retract_Count", "value": 100,
+                                                       "raw": {"value": 50}})
+            return j
+        self.fake_smartctl = sc
+        s = self.sens(self.backend())
+        self.assertEqual(s["storage.ata2.smart.a192"].label, "Power-off retracts")
 
 
 if __name__ == "__main__":

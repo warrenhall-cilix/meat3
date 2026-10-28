@@ -125,7 +125,15 @@ class Updater:
         self.run(["systemctl", "reset-failed", UNIT], timeout=5)
         try:
             os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
-            open(self.log_path, "w").close()
+            # not world-readable: the installer's output is nobody else's business (/run/meat3 is 0755)
+            fd = os.open(self.log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640)
+            os.fchmod(fd, 0o640)
+            try:
+                import grp
+                os.fchown(fd, -1, grp.getgrnam("meat3").gr_gid)
+            except (KeyError, PermissionError):
+                pass
+            os.close(fd)
         except OSError:
             pass
         rc, out = self.run(["systemd-run", f"--unit={UNIT}", "--collect", "--service-type=exec",

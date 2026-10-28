@@ -63,7 +63,16 @@
     {
      "refId": "A",
      "expr": "meat3_up{instance=~\"$instance\"}",
-     "legendFormat": "{{instance}}",
+     "legendFormat": "{{instance}} daemon",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     }
+    },
+    {
+     "refId": "B",
+     "expr": "min by (instance) (up{instance=~\"$instance\"})",
+     "legendFormat": "{{instance}} web",
      "datasource": {
       "type": "prometheus",
       "uid": "${datasource}"
@@ -77,7 +86,7 @@
        "type": "value",
        "options": {
         "0": {
-         "text": "daemon down",
+         "text": "down",
          "color": "red"
         },
         "1": {
@@ -161,7 +170,7 @@
   {
    "id": 3,
    "type": "stat",
-   "title": "Total GPU + CPU power",
+   "title": "GPU / CPU power",
    "datasource": {
     "type": "prometheus",
     "uid": "${datasource}"
@@ -175,8 +184,8 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "sum by (instance) (meat3_power_watts{instance=~\"$instance\",id=~`nv\\d+\\.pwr\\.board_real|amdgpu\\d+\\.gm\\.(average|current)_socket_power|amdgpu\\d+\\.vrm\\.real_power`})",
-     "legendFormat": "{{instance}}",
+     "expr": "sum by (instance) (max by (instance, device) (meat3_power_watts{instance=~\"$instance\",id=~`nv\\d+\\.pwr\\.board_real|amdgpu\\d+\\.gm\\.(average|current)_socket_power|amdgpu\\d+\\.vrm\\.real_power`}))",
+     "legendFormat": "{{instance}} GPU",
      "datasource": {
       "type": "prometheus",
       "uid": "${datasource}"
@@ -184,8 +193,8 @@
     },
     {
      "refId": "B",
-     "expr": "sum by (instance) (meat3_power_watts{instance=~\"$instance\",id=~`cpu\\d*\\.(pmt\\.ppt|rapl\\.intel_rapl_0|pwr\\.package)`})",
-     "legendFormat": "{{instance}}",
+     "expr": "sum by (instance) (max by (instance, device) (meat3_power_watts{instance=~\"$instance\",id=~`cpu\\d*\\.(pmt\\.ppt|rapl\\.intel_rapl_0|pwr\\.package)`}))",
+     "legendFormat": "{{instance}} CPU",
      "datasource": {
       "type": "prometheus",
       "uid": "${datasource}"
@@ -457,7 +466,7 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "meat3_temperature_celsius{instance=~\"$instance\",id=~`cpu\\d*\\.(k10temp\\.temp1|temp\\.tctl|cores\\.temp_max)|cpu\\d+\\.coretemp\\.temp1`}",
+     "expr": "meat3_temperature_celsius{instance=~\"$instance\",id=~`cpu\\d*\\.(k10temp\\.temp1|temp\\.tctl|cores\\.temp_max)|cpu\\d+\\.coretemp_[^.]+\\.temp1`}",
      "legendFormat": "{{instance}} {{sensor}}",
      "datasource": {
       "type": "prometheus",

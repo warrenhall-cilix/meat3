@@ -19,7 +19,8 @@ def panel(title, expr, unit, x, y, w=12, h=8, legend=LEG, kind="timeseries", ext
     _id[0] += 1
     p = {"id": _id[0], "type": kind, "title": title, "datasource": DS,
          "gridPos": {"x": x, "y": y, "w": w, "h": h},
-         "targets": [{"refId": chr(65 + i), "expr": e, "legendFormat": legend, "datasource": DS}
+         "targets": [{"refId": chr(65 + i), "expr": e,
+                      "legendFormat": legend[i] if isinstance(legend, list) else legend, "datasource": DS}
                      for i, e in enumerate(expr if isinstance(expr, list) else [expr])],
          "fieldConfig": {"defaults": {"unit": unit, "custom": {"lineWidth": 1, "fillOpacity": 8}}, "overrides": []},
          "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max", "mean"]},
@@ -38,16 +39,18 @@ GPU_TEMP = r'nv\d+\.t\.(gpu|hotspot|mem)|amdgpu\d+\.gm\.temperature_(edge|hotspo
 GPU_POWER = r'nv\d+\.pwr\.board_real|amdgpu\d+\.gm\.(average|current)_socket_power|amdgpu\d+\.vrm\.real_power'
 GPU_CLK = r'nv\d+\.clk\.(gpc|mem_eff)|amdgpu\d+\.gm\.(average|current)_(gfxclk|uclk)_frequency'
 GPU_LOAD = r'nv\d+\.(util|load)\.gpu|amdgpu\d+\.gm\.average_gfx_activity'
-CPU_TEMP = r'cpu\d*\.(k10temp\.temp1|temp\.tctl|cores\.temp_max)|cpu\d+\.coretemp\.temp1'
+CPU_TEMP = r'cpu\d*\.(k10temp\.temp1|temp\.tctl|cores\.temp_max)|cpu\d+\.coretemp_[^.]+\.temp1'
 CPU_POWER = r'cpu\d*\.(pmt\.ppt|rapl\.intel_rapl_0|pwr\.package)'
 CPU_CLK = r'cpu\d*\.clk\.(eff_avg|eff_max)'
 CPU_LOAD = r'cpu\d*\.util\.total'
 
 y = 0
 panels = [
-    panel("Up", f"meat3_up{{{SEL}}}", "none", 0, y, 6, 4, "{{instance}}", "stat",
+    # meat3_up: daemon reachable; up: meat3-web itself scraped (meat3_up vanishes when it's down)
+    panel("Up", [f"meat3_up{{{SEL}}}", f'min by (instance) (up{{{SEL}}})'], "none", 0, y, 6, 4,
+          ["{{instance}} daemon", "{{instance}} web"], "stat",
           {"options": {"colorMode": "background", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"]}},
-           "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"0": {"text": "daemon down", "color": "red"},
+           "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"0": {"text": "down", "color": "red"},
                                                                                   "1": {"text": "up", "color": "green"}}}]},
                            "overrides": []}}),
     panel("Hottest sensor per machine", f'max by (instance) (meat3_temperature_celsius{{{SEL}}})', "celsius",
@@ -56,9 +59,11 @@ panels = [
            "fieldConfig": {"defaults": {"unit": "celsius", "thresholds": {"mode": "absolute", "steps": [
                {"color": "green", "value": None}, {"color": "orange", "value": 80}, {"color": "red", "value": 95}]}},
                            "overrides": []}}),
-    panel("Total GPU + CPU power", [f'sum by (instance) (meat3_power_watts{{{SEL},id=~`{GPU_POWER}`}})',
-                                    f'sum by (instance) (meat3_power_watts{{{SEL},id=~`{CPU_POWER}`}})'],
-          "watt", 12, y, 12, 4, "{{instance}}", "stat",
+    # one source per device (max), then summed per machine: the regexes list alternatives for the same
+    # chip (CPU PPT vs RAPL package, AMD GPU firmware vs VRM power) that must not be added up
+    panel("GPU / CPU power", [f'sum by (instance) (max by (instance, device) (meat3_power_watts{{{SEL},id=~`{GPU_POWER}`}}))',
+                              f'sum by (instance) (max by (instance, device) (meat3_power_watts{{{SEL},id=~`{CPU_POWER}`}}))'],
+          "watt", 12, y, 12, 4, ["{{instance}} GPU", "{{instance}} CPU"], "stat",
           {"options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}}}),
 ]
 y += 4

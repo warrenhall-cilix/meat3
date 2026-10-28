@@ -958,9 +958,9 @@ class AmdCpuBackend(Backend):
         if wb:
             on = r.active
             out.append(Sensor(f"{p}.l3.reserve.game_mb", g, "L3 reserved for game",
-                              bin(game).count("1") * wb / 1048576 if on else None, "MB", 0, hint))
+                              bin(game).count("1") * wb / 1048576 if on else None, "MiB", 0, hint))
             out.append(Sensor(f"{p}.l3.reserve.bg_mb", g, "L3 limit for everything else",
-                              bin(bg).count("1") * wb / 1048576 if on else None, "MB", 0, hint))
+                              bin(bg).count("1") * wb / 1048576 if on else None, "MiB", 0, hint))
         return out
 
     def _misc(self) -> list[Sensor]:

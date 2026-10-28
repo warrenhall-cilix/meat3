@@ -166,7 +166,15 @@ class TestBoard(unittest.TestCase):
         self.assertTrue(bm.describe("nct6799", "temp9", "Virtual_TEMP", None)["hidden"])
         # it87 in3 already doubled by the driver when in3_label exists
         e = bm.lookup("it8696", "Gigabyte Technology Co., Ltd.", "X870E AORUS PRO")
-        self.assertEqual(bm.describe("it8696", "in3", "+3.3V", e)["mult"], 1.25)
+        d = bm.describe("it8696", "in3", "+3.3V", e)              # AVCC on VIN3: driver label, x1
+        self.assertEqual((d["label"], d["mult"]), ("+3.3V", 1.0))
+        # IT87952E second chip on a board without its own entry: no Gigabyte main-chip rails
+        self.assertIsNone(bm.lookup("it87952_a008090a", "Gigabyte Technology Co., Ltd.", "X670E AORUS MASTER"))
+        self.assertTrue(bm.lookup("it8689", "Gigabyte Technology Co., Ltd.", "X570 AORUS ELITE")["guess"])
+        self.assertTrue(bm.OPEN_PROBE(-55) and bm.OPEN_PROBE(127))
+        self.assertFalse(bm.OPEN_PROBE(125))                       # a real hot VRM still shows
+        a = bm.lookup("nct6799", "ASUSTeK COMPUTER INC.", "ROG STRIX X870E-E GAMING WIFI")
+        self.assertTrue(bm.describe("nct6799", "temp2", "CPUTIN", a)["hidden"])
         self.assertFalse(bm.plausible("+12V", 4.0))
         self.assertTrue(bm.plausible("Vcore", 0.4))
 

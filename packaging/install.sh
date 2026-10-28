@@ -5,7 +5,8 @@
 #   --kmod      build the meat3_smu kernel module even without an RDNA4 GPU present
 #   --no-kmod   don't (re)build the meat3_smu kernel module
 #   --web       also run the read-only web UI (port 8733) as a service
-#   --headless  server without a desktop: skip Qt and MangoHud (use meat3-tui or --web)
+#   --headless  server without a desktop: skip Qt and MangoHud (use meat3-tui or --web); remembered
+#   --desktop   undo an earlier --headless
 set -euo pipefail
 if [[ $EUID -eq 0 ]] && ! command -v sudo >/dev/null; then sudo() { "$@"; }; fi   # e.g. Proxmox as root
 PREFIX=/opt/meat3
@@ -13,7 +14,9 @@ SRC="$(cd "$(dirname "$0")/.." && pwd)"
 USER_NAME="${SUDO_USER:-$USER}"
 
 if [[ "${1:-}" == "--uninstall" ]]; then
-    sudo systemctl disable --now meat3d.service meat3-web.service 2>/dev/null || true
+    for u in meat3-web.service meat3d.service; do      # one at a time: a missing unit fails the whole call
+        sudo systemctl disable --now "$u" 2>/dev/null || true
+    done
     sudo rm -rf "$PREFIX" /etc/systemd/system/meat3d.service /etc/systemd/system/meat3-web.service /usr/local/bin/meat3-web /usr/local/bin/meat3 /usr/local/bin/meat3d /usr/local/bin/meat3-cotune /usr/local/bin/meat3-tui \
         /usr/local/bin/meat3-gputune /usr/local/bin/meat3-skutable /usr/share/applications/meat3.desktop /etc/modules-load.d/meat3-smu.conf
     if command -v dkms >/dev/null && dkms status meat3_smu 2>/dev/null | grep -q meat3_smu; then
@@ -33,12 +36,13 @@ done
 [[ " $* " == *" --no-kmod "* ]] && WANT_KMOD=0
 DESKTOP=1
 [[ " $* " == *" --headless "* || -f "$PREFIX/HEADLESS" ]] && DESKTOP=0   # remembered for updates
+[[ " $* " == *" --desktop "* ]] && DESKTOP=1
 WANT_WEB=0
 [[ " $* " == *" --web "* ]] && WANT_WEB=1
 
 if [[ " $* " != *" --no-deps "* ]]; then
     if command -v pacman >/dev/null; then
-        sudo pacman -S --needed --noconfirm python python-evdev python-psutil lm_sensors i2c-tools git
+        sudo pacman -S --needed --noconfirm python python-evdev python-psutil lm_sensors i2c-tools git smartmontools
         if [[ $DESKTOP == 1 ]]; then sudo pacman -S --needed --noconfirm pyside6 mangohud; fi
         if [[ $WANT_KMOD == 1 ]]; then
             sudo pacman -S --needed --noconfirm dkms
@@ -49,12 +53,12 @@ if [[ " $* " != *" --no-deps "* ]]; then
         pacman -Qq nvidia-utils >/dev/null 2>&1 && sudo pacman -S --needed --noconfirm python-nvidia-ml-py || true
         echo "Optional (AMD CPU Infinity Fabric / SMU telemetry): install ryzen_smu-dkms-git from the AUR"
     elif command -v apt-get >/dev/null; then
-        sudo apt-get install -y python3 python3-evdev python3-psutil lm-sensors i2c-tools git || true
+        sudo apt-get install -y python3 python3-evdev python3-psutil lm-sensors i2c-tools git smartmontools || true
         if [[ $DESKTOP == 1 ]]; then sudo apt-get install -y python3-pyside6.qtwidgets mangohud || true; fi
         if [[ $WANT_KMOD == 1 ]]; then sudo apt-get install -y dkms "linux-headers-$(uname -r)" || true; fi
         command -v nvidia-smi >/dev/null && (sudo apt-get install -y python3-pynvml || pip3 install --user nvidia-ml-py) || true
     elif command -v dnf >/dev/null; then
-        sudo dnf install -y python3 python3-evdev python3-psutil lm_sensors i2c-tools git || true
+        sudo dnf install -y python3 python3-evdev python3-psutil lm_sensors i2c-tools git smartmontools || true
         if [[ $DESKTOP == 1 ]]; then sudo dnf install -y python3-pyside6 mangohud || true; fi
         if [[ $WANT_KMOD == 1 ]]; then sudo dnf install -y dkms kernel-devel || true; fi
         command -v nvidia-smi >/dev/null && pip3 install --user nvidia-ml-py || true
@@ -148,7 +152,11 @@ fi
 
 sudo cp "$SRC/packaging/meat3d.service" /etc/systemd/system/meat3d.service
 sudo cp "$SRC/packaging/meat3-web.service" /etc/systemd/system/meat3-web.service
-if [[ $DESKTOP == 1 ]]; then sudo cp "$SRC/packaging/meat3.desktop" /usr/share/applications/meat3.desktop; fi
+if [[ $DESKTOP == 1 ]]; then
+    sudo cp "$SRC/packaging/meat3.desktop" /usr/share/applications/meat3.desktop
+else
+    sudo rm -f /usr/share/applications/meat3.desktop
+fi
 sudo /usr/local/bin/meat3-web --gen-token >/dev/null      # web UI login token (kept on reinstall)
 sudo systemctl daemon-reload
 sudo systemctl enable meat3d.service
@@ -162,8 +170,12 @@ systemctl --no-pager --lines=5 status meat3d.service || true
 echo
 echo "Installed meat3 $VER"
 if systemctl is-enabled --quiet meat3-web.service 2>/dev/null; then
-    echo "Web UI (read-only). Log in with:"
-    sudo /usr/local/bin/meat3-web --url | sed 's/^/   /'
+    if [[ -t 1 ]]; then              # only to a terminal: update runs log to a file
+        echo "Web UI (read-only). Log in with:"
+        sudo /usr/local/bin/meat3-web --url | sed 's/^/   /'
+    else
+        echo "Web UI (read-only) on port 8733. Login link: sudo meat3-web --url"
+    fi
 fi
 echo "Done. Log out and back in once (group membership), then run: meat3"
 echo "OSD hotkey: Right Ctrl + F12. In-game overlay: see README (MangoHud)."

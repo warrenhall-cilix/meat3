@@ -5,8 +5,9 @@ Per drive:
   * NVMe health from the SMART / Health Information log (Get Log Page 0x02, the read-only admin
     command `smartctl -a` and `nvme smart-log` send). Layout: NVMe Base Specification, Figure
     "SMART / Health Information Log Page". Read every SMART_EVERY_S seconds, root only.
-  * SATA SMART via `smartctl -j -A -H -n standby` if smartctl is installed; `-n standby` never
+  * SATA SMART via `smartctl -j -A -H -i -n standby` if smartctl is installed; `-n standby` never
     spins up a sleeping hard drive. USB drives are skipped (bridges often mangle SMART).
+  * Health reads run in a worker thread: a slow or failing drive never stalls the daemon's poll.
   * PCIe link speed/width (NVMe) against the maximum, to spot a drive in a slower slot
   * read/write rate and busy % from /sys/block/<dev>/stat
 
@@ -22,6 +23,7 @@ import re
 import shutil
 import struct
 import subprocess
+import threading
 import time
 from typing import Callable, Optional
 
@@ -50,10 +52,13 @@ def nvme_get_smart_log(dev_path: str) -> Optional[bytes]:
     try:
         buf = ctypes.create_string_buffer(512)
         numd = 512 // 4 - 1
+        # timeout_ms 0 = the driver's admin_timeout (60 s), like smartctl/nvme-cli: an admin command
+        # that times out makes nvme-pci reset the controller, so never pass a short one
         cmd = bytearray(_PASSTHRU.pack(NVME_ADMIN_GET_LOG_PAGE, 0, 0, 0xFFFFFFFF, 0, 0, 0,
                                        ctypes.addressof(buf), 0, 512,
-                                       (numd << 16) | NVME_LOG_SMART, 0, 0, 0, 0, 0, 2000, 0))
-        fcntl.ioctl(fd, NVME_IOCTL_ADMIN_CMD, cmd)
+                                       (numd << 16) | NVME_LOG_SMART, 0, 0, 0, 0, 0, 0, 0))
+        if fcntl.ioctl(fd, NVME_IOCTL_ADMIN_CMD, cmd) != 0:
+            return None                  # >0 = NVMe status (e.g. log page unsupported): no data
         return buf.raw
     except OSError:
         return None
@@ -91,8 +96,17 @@ def parse_nvme_smart(b: bytes) -> dict:
     }
 
 
+_SMARTCTL: list = []
+
+
+def smartctl_path() -> Optional[str]:
+    if not _SMARTCTL:
+        _SMARTCTL.append(shutil.which("smartctl"))
+    return _SMARTCTL[0]
+
+
 def run_smartctl(dev: str) -> Optional[dict]:
-    exe = shutil.which("smartctl")
+    exe = smartctl_path()
     if not exe:
         return None
     try:
@@ -110,7 +124,7 @@ ATA_ATTRS = {
     198: ("Offline uncorrectable", "", False),
     199: ("Interface CRC errors", "", False),
     12: ("Power cycles", "", False),
-    192: ("Unsafe shutdowns", "", False),
+    192: ("Unsafe shutdowns", "", False),        # SSDs; on hard drives it's the power-off retract count
     177: ("Wear levelling (normalised)", "%", True),
     202: ("Life left (normalised)", "%", True),
     231: ("Life left (normalised)", "%", True),
@@ -147,11 +161,14 @@ class StorageBackend(Backend):
 
     def __init__(self, sys_root: str = "/sys", dev_root: str = "/dev", clock=time.monotonic,
                  smart_reader: Callable[[str], Optional[bytes]] = nvme_get_smart_log,
-                 smartctl: Callable[[str], Optional[dict]] = run_smartctl):
+                 smartctl: Callable[[str], Optional[dict]] = run_smartctl, background: bool = True):
         self.sys_root, self.dev_root, self.clock = sys_root, dev_root, clock
         self.smart_reader, self.smartctl = smart_reader, smartctl
+        self.background = background
         self.drives: list[dict] = []
-        self.smart: dict[str, tuple[float, Optional[dict]]] = {}
+        self.smart: dict[str, tuple[float, object]] = {}      # drive id -> (read time, data)
+        self.smart_lock = threading.Lock()
+        self._worker: Optional[threading.Thread] = None
         self.rates = _Rates()
         self.last_scan = -1e9
         self._scan()
@@ -182,10 +199,13 @@ class StorageBackend(Backend):
             cdir = os.path.join(nvme_cls, c)
             model = (read_str(os.path.join(cdir, "model")) or "").strip()
             pci = os.path.realpath(os.path.join(cdir, "device"))
-            blocks = sorted(b for b in _listdir(os.path.join(self.sys_root, "block"))
-                            if re.fullmatch(rf"{c}n\d+", b) or re.fullmatch(rf"{c}c\d+n\d+", b))
+            # namespaces as the controller lists them (with native multipath the head disk is named
+            # after the subsystem, not the controller); hidden per-path disks only as a fallback
+            ents = _listdir(cdir)
+            blocks = sorted(b for b in ents if re.fullmatch(r"nvme\d+n\d+", b)) or \
+                sorted(b for b in ents if re.fullmatch(r"nvme\d+c\d+n\d+", b))
             hw = None
-            for d in _listdir(cdir):                   # nvme puts hwmonN in the controller dir
+            for d in ents:                             # nvme puts hwmonN in the controller dir
                 if re.fullmatch(r"hwmon\d+", d):
                     hw = os.path.join(cdir, d)
             hw = hw or self._hwmon_of(cdir)
@@ -203,7 +223,10 @@ class StorageBackend(Backend):
             model = (read_str(os.path.join(ddir, "model")) or "").strip()
             if vendor and vendor.upper() not in ("ATA",) and not model.startswith(vendor):
                 model = f"{vendor} {model}"
-            drives.append({"id": b, "type": "usb" if usb else "sata",
+            # id from the ATA port, not sdX: sdX letters move when another disk or a USB stick appears
+            port = re.search(r"/(ata\d+)/", path)
+            did = port.group(1) if port and not usb else f"usb_{b}" if usb else b
+            drives.append({"id": did, "type": "usb" if usb else "sata",
                            "title": f"{'USB' if usb else 'SATA'} {b}: {model or b}", "model": model,
                            "dev": os.path.join(self.dev_root, b), "blocks": [b],
                            "hwmon": self._hwmon_of(ddir), "rotational":
@@ -216,48 +239,99 @@ class StorageBackend(Backend):
                 except ValueError:
                     pass
             d["size_gb"] = size / 1e9 if size else None
+            d["temps"] = self._temp_channels(d)
         self.drives = drives
         self.last_scan = self.clock()
 
-    # -- polling
-    def _cached(self, key: str, every: float, fn):
+    def _temp_channels(self, d: dict) -> list[tuple]:
+        """(channel, label, hint) per temperature, resolved once per scan: on NVMe every read of
+        temp*_max is an admin command (Get Features), so limits aren't re-read each poll.
+        Hard drives: none (temperature comes from smartctl, as drivetemp reads can keep them awake)."""
+        hw = d.get("hwmon")
+        if not hw or d.get("rotational"):
+            return []
+        out = []
+        for ch in hwmon_channels(hw):
+            if ch["kind"] != "temp":
+                continue
+            lab = ch["label"]
+            if lab == ch["key"]:
+                lab = "Temperature" if ch["idx"] == 1 else f"Temperature {ch['idx']}"
+            hint = f"hwmon {os.path.basename(hw)}"
+            lim = []
+            for suf, nm in (("max", "warning"), ("crit", "critical")):
+                v = read_str(os.path.join(hw, f"temp{ch['idx']}_{suf}"))
+                if v and v.lstrip("-").isdigit() and -40000 < int(v) < 200000:
+                    lim.append(f"{nm} {int(v) / 1000:.0f} °C")
+            if lim:
+                hint += "; drive's own limits: " + ", ".join(lim)
+            if lab == "Composite":
+                hint += "; Composite is the drive's overall temperature (what it throttles on)"
+            out.append((ch, lab, hint))
+        return out
+
+    # -- health reads (worker thread)
+    def _due(self) -> list[tuple]:
         now = self.clock()
-        t, val = self.smart.get(key, (-1e9, None))
-        if now - t >= every:
-            val = fn()
-            self.smart[key] = (now, val)
-        return val
+        jobs = []
+        for d in self.drives:
+            if d["type"] == "nvme":
+                every, fn = SMART_EVERY_S, (lambda dev=d["dev"]: self.smart_reader(dev))
+            elif d["type"] == "sata":
+                every, fn = SATA_SMART_EVERY_S, (lambda dev=d["dev"]: self.smartctl(dev))
+            else:
+                continue
+            with self.smart_lock:
+                t = self.smart.get(d["id"], (-1e9, None))[0]
+            if now - t >= every:
+                jobs.append((d["id"], fn))
+        return jobs
+
+    def _run_jobs(self, jobs: list[tuple]):
+        for key, fn in jobs:
+            try:
+                val = fn()
+            except Exception:
+                val = None
+            with self.smart_lock:
+                self.smart[key] = (self.clock(), val)    # failures wait a full interval too
+
+    def _refresh_health(self):
+        if self._worker is not None and self._worker.is_alive():
+            return                                     # previous round still running (slow drive)
+        jobs = self._due()
+        if not jobs:
+            return
+        if not self.background:
+            self._run_jobs(jobs)
+            return
+        with self.smart_lock:                          # mark as started so they aren't queued twice
+            for key, _ in jobs:
+                old = self.smart.get(key, (-1e9, None))[1]
+                self.smart[key] = (self.clock(), old)
+        self._worker = threading.Thread(target=self._run_jobs, args=(jobs,), name="meat3-storage-smart",
+                                        daemon=True)
+        self._worker.start()
+
+    def _health(self, key: str):
+        with self.smart_lock:
+            return self.smart.get(key, (0, None))[1]
+
+    # -- polling
 
     def sensors(self) -> list[Sensor]:
         now = self.clock()
         if now - self.last_scan > RESCAN_S:
             self._scan()
+        self._refresh_health()
         out: list[Sensor] = []
         for d in self.drives:
             p = f"storage.{d['id']}"
             g = f"Storage/{d['title']}"
             S = lambda key, label, v, unit="", dec=0, hint="", grp=g: out.append(
                 Sensor(f"{p}.{key}", grp, label, v, unit, dec, hint))
-            # temperatures (hard drives: from smartctl below, since drivetemp reads can keep them awake)
-            if d.get("hwmon") and not d.get("rotational"):
-                for ch in hwmon_channels(d["hwmon"]):
-                    if ch["kind"] != "temp":
-                        continue
-                    lab = ch["label"]
-                    if lab == ch["key"]:
-                        lab = "Temperature" if ch["idx"] == 1 else f"Temperature {ch['idx']}"
-                    hint = f"hwmon {os.path.basename(d['hwmon'])}"
-                    hw = d["hwmon"]
-                    lim = []
-                    for suf, nm in (("max", "warning"), ("crit", "critical")):
-                        v = read_str(os.path.join(hw, f"temp{ch['idx']}_{suf}"))
-                        if v and v.lstrip("-").isdigit() and -40000 < int(v) < 200000:
-                            lim.append(f"{nm} {int(v) / 1000:.0f} °C")
-                    if lim:
-                        hint += "; drive's own limits: " + ", ".join(lim)
-                    if lab == "Composite":
-                        hint += "; Composite is the drive's overall temperature (what it throttles on)"
-                    S(f"t.{ch['key']}", lab, read_hwmon_value(ch), "°C", 0, hint)
+            for ch, lab, hint in d["temps"]:
+                S(f"t.{ch['key']}", lab, read_hwmon_value(ch), "°C", 0, hint)
             # throughput
             rd = wr = busy = None
             for blk in d["blocks"]:
@@ -297,7 +371,7 @@ class StorageBackend(Backend):
         S("pcie.gen", "PCIe link generation", gen.get(cs) if cs else None, "", 0, hint)
         S("pcie.width", "PCIe link width", cw, "lanes", 0, hint)
 
-        raw = self._cached(d["id"], SMART_EVERY_S, lambda: self.smart_reader(d["dev"]))
+        raw = self._health(d["id"])
         h = parse_nvme_smart(raw) if raw and len(raw) >= 232 else None
         src = "NVMe SMART/Health log (log page 02h), read every 60 s"
         get = (lambda k: h.get(k)) if h else (lambda k: None)
@@ -325,18 +399,19 @@ class StorageBackend(Backend):
         thr = None
         if h:
             thr = (get("thm_temp1_total_time") + get("thm_temp2_total_time")) / 60.0
-        S("smart.throttle_time", "Thermal throttling (total)", thr, "min", 1,
-          src + "; host-controlled thermal management 1 (light) + 2 (heavy)")
+        S("smart.throttle_time", "Host thermal management time", thr, "min", 1,
+          src + "; time in host-controlled thermal management 1 + 2. Stays 0 unless the OS set HCTM "
+                "thresholds; the drive's own throttling shows as time over warning temp")
 
     def _sata(self, d: dict, S):
-        j = self._cached(d["id"], SATA_SMART_EVERY_S, lambda: self.smartctl(d["dev"]))
+        j = self._health(d["id"])
         src = "smartctl -A (every 5 min, skipped while the drive sleeps)"
         if not j or "ata_smart_attributes" not in j:
-            if j is None and not shutil.which("smartctl"):
+            if j is None and not smartctl_path():
                 src = "install smartctl (smartmontools) for SATA health"
             S("smart.health", "SMART overall", None, "", 0, src)
             return
-        if d.get("rotational"):
+        if not d["temps"]:                       # hard drive, or SSD without the drivetemp module
             S("t.smart", "Temperature", (j.get("temperature") or {}).get("current"), "°C", 0, src)
         ok = (j.get("smart_status") or {}).get("passed")
         S("smart.health", "SMART overall (1 = passed)", None if ok is None else (1 if ok else 0), "", 0, src)
@@ -347,8 +422,11 @@ class StorageBackend(Backend):
             if not spec or spec[0] in seen:
                 continue
             seen.add(spec[0])
+            label = spec[0]
+            if a.get("id") == 192 and d.get("rotational"):
+                label = "Power-off retracts"           # counts normal power-offs too on hard drives
             v = a.get("value") if spec[2] else (a.get("raw") or {}).get("value")
-            S(f"smart.a{a['id']}", spec[0], v, spec[1], 0, f"{src}; attribute {a['id']} {a.get('name', '')}")
+            S(f"smart.a{a['id']}", label, v, spec[1], 0, f"{src}; attribute {a['id']} {a.get('name', '')}")
         for a in (j.get("ata_smart_attributes") or {}).get("table", []):
             if a.get("id") == 241 and "LBA" in a.get("name", ""):
                 lbas = (a.get("raw") or {}).get("value")

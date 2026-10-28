@@ -27,8 +27,8 @@ NOMINAL = [(re.compile(r"\+12V"), 10.0, 14.0), (re.compile(r"\+5V"), 4.2, 5.8),
            (re.compile(r"\+3\.3V|3V Standby|3\.3V Standby|AVSB|AVCC|3VSB"), 2.8, 3.8),
            (re.compile(r"CMOS Battery|Vbat"), 1.8, 3.6)]
 
-# open/unconnected thermistor readings: ITE -55/-128 °C, Nuvoton -40/127/255
-OPEN_PROBE = lambda v: v is not None and (v <= -40.0 or v >= 125.0)
+# open/unconnected thermistor readings: ITE -55/-128 °C, Nuvoton 127/255 (a real 125 °C VRM must show)
+OPEN_PROBE = lambda v: v is not None and (v <= -40.0 or v >= 127.0)
 
 GIGABYTE = "gigabyte"
 ASUS = "asustek"
@@ -70,13 +70,13 @@ ENTRIES: list[dict] = [
      "hide": ["in0", "in1", "in3", "in6", "in7", "in8"]},          # unused pins; 3VSB/Vbat duplicate the IT8696E
     # ---- Gigabyte AM5 B650 family (IT8689E)
     {"name": "Gigabyte B650 (IT8689E)", "chip": "it8689", "vendor": GIGABYTE, "boards": _GB_B650_BOARDS,
-     "in": {**_GB_IT_RAILS, "in6": ("Dual DDR5 5V", 2.5)},
+     "in": {**_GB_IT_RAILS, "in6": ("DDR5 +5V", 2.5)},
      "temp": {"temp1": "System", "temp2": "PCH (chipset)", "temp3": "CPU (socket)", "temp4": "PCIe x16",
               "temp5": "VRM MOS", "temp6": "VSoC MOS"},
      "fan": {**_GB_FANS, "fan6": "System Fan 4 / Pump"}},
-    # ---- Gigabyte, any other board with an ITE chip: the long-standing Gigabyte rail layout,
-    # kept only where the plausibility check agrees
-    {"name": "Gigabyte (ITE, generic)", "chip": "it8", "vendor": GIGABYTE, "boards": None,
+    # ---- Gigabyte, any other board's main ITE chip (IT86xx; not the IT879xx second chip, whose pins
+    # mean something else): the long-standing Gigabyte rail layout, kept where the plausibility check agrees
+    {"name": "Gigabyte (ITE, generic)", "chip": "it86", "vendor": GIGABYTE, "boards": None,
      "in": _GB_IT_RAILS, "fan": {"fan1": "CPU Fan"}, "guess": True},
 
     # ---- ASUS (Nuvoton NCT6799D / NCT6701D, Linux kind nct6799)
@@ -85,6 +85,7 @@ ENTRIES: list[dict] = [
      "in": _ASUS_800,
      "fan": {"fan1": "Chassis Fan 1", "fan2": "CPU Fan", "fan3": "Chassis Fan 2", "fan4": "Chassis Fan 3",
              "fan5": "Chassis Fan 4", "fan6": "Chassis Fan 5", "fan7": "AIO Pump"},
+     "temp_by_label": {"CPUTIN": None},       # kernel docs: CPUTIN is meaningless on ASUS boards
      "hide": ["in5", "in6", "in9", "in11", "in12", "in13", "in14", "in15", "in16", "in17"]},
     {"name": "ASUS B850/X870 (NCT6701D)", "chip": "nct6799", "vendor": ASUS,
      "boards": ["ROG STRIX B850-A GAMING WIFI", "TUF GAMING B850-BTF WIFI W", "TUF GAMING X870-PRO WIFI7 W NEO",
@@ -92,12 +93,14 @@ ENTRIES: list[dict] = [
                 "ROG STRIX X870-I GAMING WIFI"],
      "in": {**_ASUS_800, "in1": ("+5V", 5.02), "in4": ("+12V", 11.98), "in9": ("VTT", 1.0),
             "in11": ("VDD Misc", 1.0), "in12": ("+1.8V Standby", 1.766)},
-     "fan": {"fan1": "Chassis Fan 1", "fan2": "CPU Fan"},
+     # fan headers differ between these boards (and the source lists names, not channels): left as Fan n
+     "temp_by_label": {"CPUTIN": None},
      "hide": ["in5", "in6", "in13", "in14", "in15", "in16", "in17"]},
     {"name": "ASUS PRIME B650-PLUS (NCT6799D)", "chip": "nct6799", "vendor": ASUS, "boards": ["PRIME B650-PLUS"],
      "in": {**_ASUS_800},
      "fan": {"fan1": "Chassis Fan 1", "fan2": "CPU Fan", "fan3": "Chassis Fan 2", "fan4": "Chassis Fan 3",
              "fan5": "CPU Optional Fan", "fan6": "AIO Pump"},
+     "temp_by_label": {"CPUTIN": None},
      "hide": ["in5", "in6", "in9", "in11", "in12", "in13", "in14", "in15", "in16", "in17"]},
     {"name": "ASUS (Nuvoton, generic)", "chip": "nct67", "vendor": ASUS, "boards": None,
      "in": {"in0": ("Vcore", 1.0), "in1": ("+5V", 5.0), "in2": ("AVSB", 1.0), "in3": ("+3.3V", 1.0),
@@ -189,6 +192,11 @@ def describe(hwmon_name: str, key: str, driver_label: Optional[str], entry: Opti
         return out
     kind = re.match(r"[a-z]+", key).group(0)
     if kind == "in":
+        if ite and key == "in3" and driver_label:
+            # in3_label only exists when VIN3 carries AVCC (+3.3V, doubled by the driver): the board
+            # map's +5V divider doesn't apply to this board
+            out.update(label=driver_label, mapped=True)
+            return out
         spec = (entry or {}).get("in", {}).get(key)
         if spec is None and nuvoton:
             spec = NUVOTON_IN.get(key)
@@ -205,8 +213,6 @@ def describe(hwmon_name: str, key: str, driver_label: Optional[str], entry: Opti
                     out["label"] = f"VIN{key[2:]} (raw pin)"
         if spec:
             label, mult = spec
-            if ite and key == "in3" and driver_label and mult > 1.0:
-                mult /= 2.0          # driver already doubled in3 on this board (AVCC on VIN3)
             out.update(label=label, mult=mult, mapped=True)
         return out
     if kind == "temp":
