@@ -79,6 +79,18 @@ sudo meat3-cotune --save-boot               # have meat3d apply them at every bo
 
 Every control is range-checked by the daemon. Only root or members of group `meat3` can apply changes. Settings are not persistent: save a profile in the GUI and re-apply it.
 
+## Themes
+
+View → Theme: **Dark**, **Light** or **Liquid Ass**, a Liquid Glass-style theme. Liquid Ass layers translucent glass panels over a painted liquid backdrop, with specular rims, a top-lit sheen, and pill-shaped tabs and buttons. Start with a specific theme using `meat3 --theme liquid`.
+
+## TUI
+
+```sh
+meat3-tui            # same daemon, in a terminal (works over SSH)
+```
+Views: **1 Overview** (dashboard panels with bars, per-pin current and per-core clocks), **2 Sensors** (everything, with min/max/avg; `/` to filter), **3 Cores** (per-core table and L3 by app), **4 Overclock** (select a control and press Enter to set it; dangerous settings require typing `yes`).
+Keys: `Tab` cycles views, `o` toggles the OSD, `r` resets stats, `q` quits. Uses only Python's built-in curses.
+
 ## OSD
 
 - Pick sensors in the **OSD** tab and toggle with **Right Ctrl + F12**. The hotkey works system-wide, including in fullscreen games, because the daemon reads the keyboard.

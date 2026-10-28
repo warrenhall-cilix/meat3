@@ -270,6 +270,12 @@ class NvidiaGPU(Backend):
             r["name"] = f"{src} → {dst}"
             r["dst_bit"] = by_idx.get(r["dst"])
             r["src_bit"] = by_idx.get(r["src"])
+        # Several entries can link the same pair (GB203: five GPC->XBAR entries, defaults 0.9/0.8/2.0/
+        # 1.2/1.5). Which one applies when is not reverse-engineered yet, so name them by entry.
+        names = [r["name"] for r in rs]
+        for r in rs:
+            if names.count(r["name"]) > 1:
+                r["name"] += f" #{r['index']} (default {r['default']:.2f})"
         return rs
 
     # ----------------------------------------------------------------- controls
