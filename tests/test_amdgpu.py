@@ -553,6 +553,33 @@ class TestRaphaelLive(unittest.TestCase):
 class TestRdna4Extras(TreeCase):
     """SMU14 pp_table limits, real per-field OD ranges, SMU14 throttle names, hwmon limits."""
 
+    def test_full_metrics_absent_then_present(self):
+        from meat3.backends import amdgpu_smu14_full as F
+        ss = {s.id: s for s in self.be.sensors()}
+        self.assertIn("load the meat3_smu module", ss["amdgpu0.fm.status"].label)
+        self.assertNotIn("amdgpu0.fm.pwr.tbp", ss)
+        thr = [0] * 21
+        thr[14] = 37                                          # PPT0
+        tbl = F.build({"AverageTotalBoardPower": 331, "AverageSocketPower": 290,
+                       "AverageGfxclkFrequencyTarget": 3010, "AvgVoltage": (1050, 750, 850, 1350),
+                       "AvgCurrent": (240, 30, 5, 12), "AvgTemperature": (60, 78, 80, 70) + (0,) * 8,
+                       "ThrottlingPercentage": thr, "VmaxThrottlingPercentage": 12, "serial": (0xBEEF, 0x12)})
+        d = os.path.join(self.root, "sys/kernel/debug/meat3_smu")
+        os.makedirs(d)
+        with open(os.path.join(d, "gpu0"), "wb") as f:
+            f.write(F.file_blob(tbl, seq=5))
+        ss = {s.id: s for s in self.be.sensors()}
+        self.assertIn("serial 000000120000BEEF", ss["amdgpu0.fm.status"].label)
+        self.assertEqual(ss["amdgpu0.fm.pwr.tbp"].value, 331)
+        self.assertEqual(ss["amdgpu0.fm.a.vdd_gfx"].value, 240)
+        self.assertAlmostEqual(ss["amdgpu0.fm.pwr.vdd_gfx"].value, 252.0)
+        self.assertAlmostEqual(ss["amdgpu0.fm.v.vddci_mem"].value, 0.85)
+        self.assertEqual(ss["amdgpu0.fm.t.hotspot_gfx"].value, 80)
+        self.assertNotIn("amdgpu0.fm.t.liquid_0", ss)                 # zero = sensor not fitted
+        self.assertEqual(ss["amdgpu0.fm.thr.ppt0"].value, 37)
+        self.assertEqual(ss["amdgpu0.fm.thr.vmax"].value, 12)
+        self.assertEqual(ss["amdgpu0.fm.clk.gfx_target"].value, 3010)
+
     def test_real_asus_9070xt_pptable(self):
         """Board pptable from a real ASUS RX 9070 XT VBIOS (115-G295BP00-100, 12/04/24; the copy at
         flash offset 0xf4320), not a synthesized blob."""

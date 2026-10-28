@@ -36,6 +36,7 @@ from ..core.model import Backend, Control, Sensor
 from . import amdgpu_metrics as gm
 from . import amdgpu_od as odm
 from . import amdgpu_pptable as ppt
+from . import amdgpu_smu14_full as fm
 
 SYSFS_ROOT_ENV = "MEAT3_SYSFS_ROOT"
 DRY_RUN_ENV = "MEAT3_DRY_RUN"
@@ -297,6 +298,8 @@ class AmdGpuBackend(Backend):
         self._seen_rows: dict[str, dict] = {}
         self._hwmon_rows = self._scan_hwmon()
         self.pptable = None
+        self.is_smu14_dgpu = bool(self.mp1 and self.mp1[:2] == (14, 0) and not self.is_apu)
+        self.full_slot = 0
         if self.mp1 and self.mp1[:2] == (14, 0) and not self.is_apu:
             try:
                 self.pptable = ppt.parse(self.io.read_bytes(os.path.join(self.dev, "pp_table")))
@@ -328,9 +331,14 @@ class AmdGpuBackend(Backend):
                 found.append((m.group(1) if m else os.path.basename(real), dev))
             found.sort()
             out = []
+            n14 = 0
             for i, (_slot, dev) in enumerate(found):
                 try:
-                    out.append(cls(dev, i, SysfsIO(root)))
+                    b = cls(dev, i, SysfsIO(root))
+                    if b.is_smu14_dgpu:
+                        # meat3_smu fills its slots in first-read order = our poll order
+                        b.full_slot, n14 = n14, n14 + 1
+                    out.append(b)
                 except Exception:   # never raise from detect()
                     continue
             return out
@@ -535,6 +543,8 @@ class AmdGpuBackend(Backend):
         if self.mp1 and self.mp1[0] == 14 and "throttle_status" in self._seen_rows:
             out += self._smu14_throttle(current.get("throttle_status"))
         out += self._board_limits()
+        if self.is_smu14_dgpu:
+            out += self._full_metrics()
         if self.is_apu and self.mp1 and tuple(self.mp1[:3]) == (13, 0, 5):
             self._mark_apu_power_unreliable(out)
         return out
@@ -554,6 +564,53 @@ class AmdGpuBackend(Backend):
                 s.hint = ("Desktop Ryzen iGPU firmware (MP1 13.0.5) does not fill this power field as "
                           "documented; it does not track real power. Use the CPU's PM-table power rows "
                           "(socket, VDDCR_CPU, VDDCR_SOC). " + (s.hint or ""))
+
+    def _full_metrics(self) -> list[Sensor]:
+        """Fields of the RDNA4 firmware metrics table that gpu_metrics leaves out (kmod/meat3_smu)."""
+        P = self.prefix
+        hint0 = "full PMFW metrics table via the meat3_smu kernel module (read-only)"
+        raw = fm.read_raw(self.full_slot, self.io.p(fm.DEBUGFS))
+        if raw is None:
+            return [Sensor(f"{P}.fm.status", self._grp("raw"),
+                           "Hidden firmware metrics: load the meat3_smu module", None,
+                           hint="sudo modprobe meat3_smu (built by the installer with --kmod); exposes "
+                                "per-rail current, total board power, throttle residency and more")]
+        m = fm.parse(raw[1])
+        out = [Sensor(f"{P}.fm.status", self._grp("raw"), f"Hidden firmware metrics: on (serial {m['serial']})",
+                      float(m["MetricsCounter"]), "", 0, hint0 + "; value = PMFW metrics counter")]
+        S = lambda sid, cat, label, v, unit, dec, h="": out.append(  # noqa: E731
+            Sensor(f"{P}.fm.{sid}", self._grp(cat), label, v, unit, dec, (h + "; " if h else "") + hint0))
+        S("pwr.tbp", "power", "Total board power (firmware)", float(m["AverageTotalBoardPower"]), "W", 0,
+          "AverageTotalBoardPower: whole card, as Windows reports it; Linux power1 is socket power")
+        S("pwr.socket_ma", "power", "Socket power (moving average)", float(m["MovingAverageSocketPower"]), "W", 0)
+        S("pwr.dgpu_w_max", "power", "dGPU_W_MAX", float(m["dGPU_W_MAX"]), "W", 0, "firmware field, meaning undocumented")
+        cur_hint = "AvgCurrent; scale not yet verified on hardware (check rail power vs board power)"
+        for plane, label in (("VDD_GFX", "GFX"), ("VDD_SOC", "SoC"), ("VDDCI_MEM", "VDDCI (memory I/O)"),
+                             ("VDDIO_MEM", "VDDIO (memory)")):
+            mv, a = m["AvgVoltage"][plane], m["AvgCurrent"][plane]
+            sid = plane.lower()
+            if plane == "VDDCI_MEM":       # the only rail voltage gpu_metrics doesn't already have
+                S(f"v.{sid}", "volt", f"{label} rail voltage", mv / 1000, "V", 3, "AvgVoltage (SVI3)")
+            S(f"a.{sid}", "current", f"{label} rail current", float(a), "A", 0, cur_hint)
+            S(f"pwr.{sid}", "power", f"{label} rail power (V × I)", mv / 1000 * a, "W", 1, cur_hint)
+        for name in ("Hotspot GFX", "Hotspot SoC", "Liquid 0", "Liquid 1", "PLX"):
+            v = m["AvgTemperature"][name]
+            if v or name.startswith("Hotspot"):
+                S("t." + name.lower().replace(" ", "_"), "temp", name, float(v), "°C", 0, "AvgTemperature")
+        if m["AvgTemperatureFanIntake"]:
+            S("t.fan_intake", "temp", "Fan intake", float(m["AvgTemperatureFanIntake"]), "°C", 0)
+        S("clk.gfx_target", "clock", "GFX clock target", float(m["AverageGfxclkFrequencyTarget"]), "MHz", 0,
+          "what the firmware wants to run; compare with the actual GFX clock")
+        S("clk.gfx_pre_ds", "clock", "GFX clock (before deep sleep)", float(m["AverageGfxclkFrequencyPreDs"]), "MHz", 0)
+        S("clk.fclk", "clock", "Fabric clock", float(m["AverageFclkFrequencyPostDs"]), "MHz", 0)
+        S("clk.mem_pre_ds", "clock", "Memory clock (before deep sleep)", float(m["AverageMemclkFrequencyPreDs"]), "MHz", 0)
+        S("pcie.busy", "pcie", "PCIe busy", float(m["AveragePCIeBusy"]), "%", 0)
+        S("thr.vmax", "throttle", "Held at voltage max (Vmax)", float(m["VmaxThrottlingPercentage"]), "%", 0,
+          "share of time the GFX voltage sat at its maximum; high = clocks limited by voltage, not power")
+        for name, pct in m["ThrottlingPercentage"].items():
+            S("thr." + name.lower().replace(" ", "_").replace("+", "p"), "throttle", f"Limited by {name}",
+              float(pct), "%", 0, "ThrottlingPercentage: share of time this limit was active")
+        return out
 
     def _smu14_throttle(self, row: Optional[dict]) -> list[Sensor]:
         """SMU14 raw throttle_status decoded with THROTTLER_*_BIT names (smu14_driver_if_v14_0.h).
