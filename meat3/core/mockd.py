@@ -781,6 +781,14 @@ class MockDaemon:
                 en = self.osd_enabled
             self.write_osd()
             return {"ok": True, "enabled": en}
+        if cmd == "update_status":
+            return {"ok": True, "installed": "mock", "behind": 2, "checking": False, "running": False,
+                    "commits": ["abc1234 mock change one", "def5678 mock change two"], "log": [],
+                    "error": "", "checked": time.time(), "can_update": True}
+        if cmd == "update_check":
+            return {"ok": True}
+        if cmd == "update_start":
+            return {"ok": False, "msg": "the mock daemon can't update itself"}
         return {"ok": False, "msg": f"unknown cmd {cmd!r}"}
 
 

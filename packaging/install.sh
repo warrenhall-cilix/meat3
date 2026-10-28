@@ -3,6 +3,7 @@
 #   --no-deps   skip distro package installation
 #   --uninstall remove meat3 (keeps /etc/meat3/config.json)
 #   --kmod      build the meat3_smu kernel module even without an RDNA4 GPU present
+#   --no-kmod   don't (re)build the meat3_smu kernel module
 set -euo pipefail
 PREFIX=/opt/meat3
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
@@ -26,6 +27,7 @@ for ip in /sys/class/drm/card*/device/ip_discovery/die/0; do      # RDNA4 dGPU =
     [[ -f "$ip/GC/0/major" && -f "$ip/MP1/0/major" ]] || continue
     [[ "$(cat "$ip/GC/0/major")" == 12 && "$(cat "$ip/MP1/0/major")" == 14 ]] && WANT_KMOD=1
 done
+[[ " $* " == *" --no-kmod "* ]] && WANT_KMOD=0
 
 if [[ " $* " != *" --no-deps "* ]]; then
     if command -v pacman >/dev/null; then
@@ -56,6 +58,12 @@ sudo rm -rf "$PREFIX"
 sudo mkdir -p "$PREFIX"
 sudo cp -r "$SRC/meat3" "$SRC/README.md" "$SRC/PROTOCOL.md" "$PREFIX/"
 sudo find "$PREFIX" -name "__pycache__" -prune -exec rm -rf {} +
+VER="$(git -c safe.directory="$SRC" -C "$SRC" describe --always --dirty 2>/dev/null || echo unknown)"
+echo "$VER" | sudo tee "$PREFIX/VERSION" >/dev/null
+if [[ -d "$SRC/.git" ]]; then                  # lets the GUI/TUI update button find this checkout
+    echo "$SRC" | sudo tee "$PREFIX/SOURCE" >/dev/null
+    sudo install -m 755 "$SRC/packaging/update.sh" "$PREFIX/update.sh"
+fi
 
 sudo tee /usr/local/bin/meat3d >/dev/null <<EOF
 #!/bin/sh
@@ -122,9 +130,11 @@ fi
 sudo cp "$SRC/packaging/meat3d.service" /etc/systemd/system/meat3d.service
 sudo cp "$SRC/packaging/meat3.desktop" /usr/share/applications/meat3.desktop
 sudo systemctl daemon-reload
-sudo systemctl enable --now meat3d.service
+sudo systemctl enable meat3d.service
+sudo systemctl restart meat3d.service     # restart, not just start: a running daemon keeps old code
 sleep 2
 systemctl --no-pager --lines=5 status meat3d.service || true
 echo
+echo "Installed meat3 $VER"
 echo "Done. Log out and back in once (group membership), then run: meat3"
 echo "OSD hotkey: Right Ctrl + F12. In-game overlay: see README (MangoHud)."

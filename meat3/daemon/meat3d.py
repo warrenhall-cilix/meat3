@@ -26,6 +26,7 @@ import traceback
 
 from .. import backends as backends_pkg
 from ..core import config, fmt
+from ..core.updater import Updater
 from ..core.model import Backend
 
 VERSION = "0.1"
@@ -195,6 +196,14 @@ class State:
 
 
 # ----------------------------------------------------------------------------- server
+def peer_uid(sock) -> int:
+    try:
+        creds = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+        return struct.unpack("3i", creds)[1]
+    except OSError:
+        return -1
+
+
 def peer_can_write(sock) -> bool:
     try:
         creds = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
@@ -211,11 +220,16 @@ def peer_can_write(sock) -> bool:
         return False
 
 
+UPDATE_EVERY = 6 * 3600       # re-check GitHub at most this often when a client asks for status
+
+
 class Handler(socketserver.StreamRequestHandler):
     state: State = None
+    updater: Updater = Updater()
 
     def handle(self):
         can_write = peer_can_write(self.request)
+        self.uid = peer_uid(self.request)
         for line in self.rfile:
             try:
                 req = json.loads(line)
@@ -241,8 +255,22 @@ class Handler(socketserver.StreamRequestHandler):
             with st.lock:
                 return {"ok": True, "enabled": bool(st.osd.get("enabled")), "items": list(st.osd.get("items", [])),
                         "hotkey": "+".join(st.osd.get("hotkey", [])), "file": OSD_TXT}
+        if cmd == "update_status":
+            up = self.updater
+            if not up.checking and time.time() - up.state["checked"] > UPDATE_EVERY:
+                up.check()
+            return {"ok": True, **up.status(), "can_update": up.may_start(getattr(self, "uid", -1))}
         if not can_write:
             return {"ok": False, "msg": f"permission denied (join group '{WRITE_GROUP}')"}
+        if cmd == "update_check":
+            self.updater.check()
+            return {"ok": True}
+        if cmd == "update_start":
+            if not self.updater.may_start(getattr(self, "uid", -1)):
+                return {"ok": False, "msg": "only the owner of the meat3 git checkout can update"}
+            ok, msg = self.updater.start()
+            print(f"meat3d: update_start -> {ok} {msg}")
+            return {"ok": ok, "msg": msg}
         if cmd == "apply":
             cid = req.get("id")
             b = st.ctl_owner.get(cid)

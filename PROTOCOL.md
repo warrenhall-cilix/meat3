@@ -15,6 +15,9 @@ Framing: one JSON object per line, in both directions. Every request gets exactl
 | `{"cmd":"osd_get"}` | `{"ok":true,"enabled":bool,"items":["sensor id",...],"hotkey":"KEY_RIGHTCTRL+KEY_F12"}` |
 | `{"cmd":"osd_set","enabled":bool?,"items":[...]?}` | `{"ok":true}` |
 | `{"cmd":"osd_toggle"}` | `{"ok":true,"enabled":bool}` |
+| `{"cmd":"update_status"}` | `{"ok":true,"installed":"<git describe>","behind":int\|null,"commits":["<hash> <subject>",...],"checking":bool,"running":bool,"log":[lines],"error":"...","can_update":bool}`. Starts a background GitHub check if the last one is over 6 h old. |
+| `{"cmd":"update_check"}` | `{"ok":true}`; fetches in the background, poll `update_status` |
+| `{"cmd":"update_start"}` | `{"ok":bool,"msg":"..."}`; pulls and reinstalls in a separate systemd unit, which restarts meat3d. Only the owner of the git checkout (or root) may start it. |
 
 `S` is a Sensor dict (see `meat3/core/model.py`) plus `"min"`, `"max"` and `"avg"`. All three are floats or null, kept by the daemon since start or since the last `reset_stats`.
 

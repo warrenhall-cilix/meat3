@@ -148,6 +148,8 @@ class Tui:
         self.sel = {v: 0 for v in range(len(VIEWS))}
         self.filter = ""
         self.last_poll = 0.0
+        self.upd: dict = {}
+        self.upd_t = 0.0
         self._colors()
 
     # ---- colours
@@ -228,6 +230,40 @@ class Tui:
         self.controls = snap.get("controls", [])
         self.poll_ms = snap.get("poll_ms")
         self.osd = osd.get("enabled")
+        if time.time() - self.upd_t > (3 if self.upd.get("running") or self.upd.get("checking") else 30):
+            self.upd_t = time.time()
+            try:
+                r = self.c.call({"cmd": "update_status"})
+                self.upd = r if r.get("ok") else {}
+            except (OSError, ValueError):
+                self.upd = {}
+
+    def update_key(self):
+        u = self.upd
+        try:
+            if not u:
+                self.flash("this daemon has no updater (update once by hand: packaging/update.sh)")
+            elif u.get("running"):
+                self.flash("updating… " + ((u.get("log") or [""])[-1])[:150])
+            elif u.get("error"):
+                self.c.call({"cmd": "update_check"})
+                self.flash(f"update check: {u['error'][:150]} (checking again)")
+            elif u.get("behind"):
+                commits = u.get("commits") or []
+                if not u.get("can_update"):
+                    self.flash(f"{u['behind']} updates available; only the owner of the git checkout can install them")
+                    return
+                if self.prompt(f"{u['behind']} new: {commits[0][8:70] if commits else ''}… install now? type y: ") != "y":
+                    return
+                r = self.c.call({"cmd": "update_start"})
+                self.flash(("" if r.get("ok") else "FAILED  ") + str(r.get("msg", "")))
+                self.upd_t = 0.0
+            else:
+                self.c.call({"cmd": "update_check"})
+                self.upd_t = time.time() - 27
+                self.flash(f"installed {u.get('installed', '?')}; checking GitHub for updates…")
+        except (OSError, ValueError) as e:
+            self.flash(f"update: {e}")
 
     def flash(self, m):
         self.msg, self.msg_t = m, time.time()
@@ -244,11 +280,14 @@ class Tui:
             t = f" {i + 1} {v} "
             self.put(0, x, t, (curses.A_REVERSE | curses.A_BOLD) if i == self.view else self.cp["head"])
             x += len(t) + 1
-        info = f"{self.hello.get('host', '?')} · poll {self.poll_ms or 0:.0f} ms · OSD {'on' if self.osd else 'off'} · " \
+        u = self.upd
+        upd = ("updating… · " if u.get("running") else
+               f"⬆ {u['behind']} updates (u) · " if u.get("behind") else "")
+        info = f"{upd}{self.hello.get('host', '?')} · poll {self.poll_ms or 0:.0f} ms · OSD {'on' if self.osd else 'off'} · " \
                f"{time.strftime('%H:%M:%S')} "
         self.put(0, max(x, w - len(info)), info, self.cp["head"])
         body_h = h - 2
-        keys = {0: "Tab views  o OSD  r reset stats  q quit",
+        keys = {0: "Tab views  o OSD  r reset stats  u update  q quit",
                 1: "↑↓ PgUp/PgDn scroll  / filter  Esc clear  o OSD  r reset  q quit",
                 2: "↑↓ scroll  o OSD  r reset  q quit",
                 3: "↑↓ select  Enter set value  o OSD  q quit"}[self.view]
@@ -640,6 +679,8 @@ class Tui:
                 self.flash("min/max/avg reset" if r.get("ok") else r.get("msg", ""))
             except (OSError, ValueError) as e:
                 self.flash(str(e))
+        elif ch == "u":
+            self.update_key()
         elif ch == "/" and v == 1:
             f = self.prompt("filter: ", self.filter)
             if f is not None:

@@ -403,6 +403,19 @@ def _exercise(app, w, tmp, sock, osd_file, mock):
     assert not theme().glass
     w.tabs.setCurrentIndex(0)
 
+    # --- updates: status-bar button and dialog (mockd reports 2 new commits)
+    w._poll_updates()
+    _wait(app, lambda: w.upd_btn.isVisible(), 5, "update button")
+    assert w.upd_btn.text() == "⬆ 2 updates available", w.upd_btn.text()
+    w.show_updates()
+    dlg = w._upd_dlg
+    _wait(app, lambda: "2 updates available" in dlg.head.text(), 5, "update dialog status")
+    assert "mock change one" in dlg.text.toPlainText()
+    assert dlg.btn_update.isEnabled()
+    dlg.btn_update.click()
+    _wait(app, lambda: "failed" in dlg.head.text().lower(), 5, "mock refuses update")
+    dlg.close()
+
     # --- daemon goes away: banner, '—'-safe, and recovery
     mock.terminate()
     mock.wait(5)

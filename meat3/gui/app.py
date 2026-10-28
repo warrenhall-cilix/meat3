@@ -21,6 +21,7 @@ from meat3.gui.common import (THEMES, SensorStore, app_icon, apply_theme, instal
 from meat3.gui.osd import OsdPage, OsdStyle, OverlayWindow
 from meat3.gui.overclock import OverclockPage
 from meat3.gui.sensors import SensorsPage
+from meat3.gui.update import UpdateDialog
 
 APP_TITLE = "meat³"
 
@@ -93,6 +94,11 @@ class MainWindow(QMainWindow):
         self.conn_lbl = QLabel("connecting…")
         self.poll_lbl = QLabel("")
         self.log_lbl = QLabel("")
+        self.upd_btn = QPushButton("")
+        self.upd_btn.setFlat(True)
+        self.upd_btn.hide()
+        self.upd_btn.clicked.connect(self.show_updates)
+        sb.addPermanentWidget(self.upd_btn)
         sb.addPermanentWidget(self.log_lbl)
         sb.addPermanentWidget(self.poll_lbl)
         sb.addPermanentWidget(self.conn_lbl)
@@ -145,6 +151,7 @@ class MainWindow(QMainWindow):
         self.act_osd = m.addAction("OSD enabled", self.toggle_osd)
         self.act_osd.setCheckable(True)
         m = mb.addMenu("&Help")
+        m.addAction("Check for updates…", self.show_updates)
         m.addAction("About meat³", self._about)
 
     def _build_tray(self):
@@ -206,6 +213,22 @@ class MainWindow(QMainWindow):
         else:
             super().paintEvent(e)
 
+    def show_updates(self):
+        dlg = getattr(self, "_upd_dlg", None)
+        if dlg is None or not dlg.isVisible():
+            self._upd_dlg = dlg = UpdateDialog(self.link, self)
+        dlg.show()
+        dlg.raise_()
+
+    def _poll_updates(self):
+        def done(u):
+            n = u.get("behind") if u.get("ok") else None
+            busy = u.get("ok") and u.get("running")
+            self.upd_btn.setText("⬆ updating…" if busy else f"⬆ {n} update{'s' * (n != 1)} available" if n else "")
+            self.upd_btn.setVisible(bool(busy or n))
+        if self.link.is_connected:
+            self.link.request({"cmd": "update_status"}, done)
+
     def _about(self):
         QMessageBox.about(self, "About meat³",
                           "<h3>meat³</h3><p>Linux hardware monitor &amp; overclocking tool.</p>"
@@ -224,6 +247,7 @@ class MainWindow(QMainWindow):
                               f"{len(hello.get('backends', []))} devices")
         self.conn_lbl.setStyleSheet(f"color:{theme().green.name()}")
         self.statusBar().showMessage("Connected to daemon", 4000)
+        QTimer.singleShot(1500, self._poll_updates)
 
     def _on_disconnected(self, why: str):
         self.banner.show_error(self.socket_path, why)
@@ -291,6 +315,9 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------------- lifecycle
     def start(self):
         self.link.start()
+        self._upd_timer = QTimer(self)
+        self._upd_timer.timeout.connect(self._poll_updates)
+        self._upd_timer.start(60_000)
 
     def closeEvent(self, e):
         if self.tray is not None and self.tray.isVisible() and not self.quitting:

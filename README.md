@@ -21,6 +21,13 @@ meat3
 ```
 Uninstall: `./packaging/install.sh --uninstall`. Config: `/etc/meat3/config.json`.
 
+**Updating:** Help → *Check for updates…* in the GUI, or `u` in `meat3-tui`. A "⬆ N updates available"
+button also appears in the status bar. Or from a terminal: `~/meat3/packaging/update.sh`.
+- Either way it pulls from GitHub, reinstalls and restarts `meat3d`. It only rebuilds the RDNA4 kernel
+  module if that changed. Reopen the window afterwards to load the new GUI.
+- The buttons only work for the user who owns the git checkout, because the update runs that
+  checkout's installer as root.
+
 Optional extras:
 - **AMD CPU fabric/SMU data** (FCLK/UCLK/MCLK, SVI3 voltages, per-core power/voltage, PPT/TDC/EDC): `ryzen_smu-dkms-git` (AUR).
 - **Motherboard fans/voltages** on Gigabyte and other ITE boards: `it87-dkms-git` (AUR).
@@ -122,7 +129,7 @@ View → Theme: **Dark**, **Light** or **Liquid Ass**, a Liquid Glass-style them
 meat3-tui            # same daemon, in a terminal (works over SSH)
 ```
 Views: **1 Overview** (dashboard panels with bars, per-pin current and per-core clocks), **2 Sensors** (everything, with min/max/avg; `/` to filter), **3 Cores** (per-core table and L3 by app), **4 Overclock** (select a control and press Enter to set it; dangerous settings require typing `yes`).
-Keys: `Tab` cycles views, `o` toggles the OSD, `r` resets stats, `q` quits. Uses only Python's built-in curses.
+Keys: `Tab` cycles views, `o` toggles the OSD, `r` resets stats, `u` checks for and installs updates, `q` quits. Uses only Python's built-in curses.
 
 ## RX 9070 / 9070 XT (RDNA4) extras
 
