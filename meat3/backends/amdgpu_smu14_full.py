@@ -38,6 +38,32 @@ OFF = {
 }
 
 
+WRAP_MA = 65536          # AvgCurrent is u16 mA, so it wraps every 65.536 A
+
+
+def unwrap_gfx_ma(cur_ma: dict, mv: dict, tbp_w: float) -> tuple[Optional[float], int]:
+    """(true VDD_GFX current in mA, wraps) or (None, -1) if board power can't pin the wrap count.
+
+    VDD_GFX passes 65.5 A in any real load, and the u16 mA field wraps. The four rails can't draw
+    more than the whole board (TotalBoardPower), and the remainder is board and regulator losses.
+    So take the most wraps that still fit inside board power, and accept it only if the leftover
+    is a believable loss. One wrap is >= 39 W even at 0.6 V, so at most one count fits the window.
+    Checked on a real ASUS 9070 XT: idle 3150 mA, 0 wraps; 345 W load 30300 mA, 3 wraps = 227 A."""
+    v = {k: x / 1000 for k, x in mv.items()}
+    if not tbp_w or v.get("VDD_GFX", 0) < 0.3:
+        return None, -1
+    others = sum(v[k] * cur_ma[k] / 1000 for k in SVI_PLANES if k != "VDD_GFX")
+    best = None
+    for k in range(16):
+        ma = cur_ma["VDD_GFX"] + k * WRAP_MA
+        rails = others + v["VDD_GFX"] * ma / 1000
+        if rails > tbp_w * 1.03:
+            break
+        best = (ma, k, tbp_w - rails)
+    if best is None or best[2] > max(25.0, 0.25 * tbp_w):
+        return None, -1
+    return float(best[0]), best[1]
+
 def read_raw(slot: int = 0, root: str = DEBUGFS) -> Optional[tuple[dict, bytes]]:
     """(header dict, table bytes) or None if the module isn't loaded / slot never filled."""
     try:

@@ -590,19 +590,24 @@ class AmdGpuBackend(Backend):
           "AverageTotalBoardPower: whole card, as Windows reports it; Linux power1 is socket power")
         S("pwr.socket_ma", "power", "Socket power (moving average)", float(m["MovingAverageSocketPower"]), "W", 0)
         S("pwr.dgpu_w_max", "power", "dGPU_W_MAX", float(m["dGPU_W_MAX"]), "W", 0, "firmware field, meaning undocumented")
-        # AvgCurrent is mA: on a real ASUS 9070 XT at idle (50 W board) the four rails come to 32 W
-        # at /1000; any coarser unit exceeds board power. Not yet checked under load (u16 mA tops
-        # out at 65.5 A, below the GFX TDC).
-        cur_hint = "AvgCurrent (mA); checked at idle on a real 9070 XT, not yet under load"
+        # AvgCurrent is u16 mA (real ASUS 9070 XT: idle rails sum to 32 W of a 50 W board). VDD_GFX
+        # wraps every 65.5 A under load, so its wrap count comes from board power.
+        cur_hint = "AvgCurrent (mA), checked on a real 9070 XT"
+        gfx_ma, wraps = fm.unwrap_gfx_ma(m["AvgCurrent"], m["AvgVoltage"], float(m["AverageTotalBoardPower"]))
         for plane, label in (("VDD_GFX", "GFX"), ("VDD_SOC", "SoC"), ("VDDCI_MEM", "VDDCI (memory I/O)"),
                              ("VDDIO_MEM", "VDDIO (memory)")):
-            mv, a = m["AvgVoltage"][plane], m["AvgCurrent"][plane]
-            a = a / 1000 * self._vrm_scale(plane)   # firmware sees reported current; show the real one
+            mv, ma = m["AvgVoltage"][plane], m["AvgCurrent"][plane]
+            h = cur_hint
+            if plane == "VDD_GFX":
+                ma = gfx_ma
+                h = (f"AvgCurrent (mA) wraps at 65.5 A; +{wraps} × 65.5 A from board power" if wraps >= 0
+                     else "AvgCurrent (mA) wraps at 65.5 A and board power can't tell how many times")
+            a = None if ma is None else ma / 1000 * self._vrm_scale(plane)   # show the real current
             sid = plane.lower()
             if plane == "VDDCI_MEM":       # the only rail voltage gpu_metrics doesn't already have
                 S(f"v.{sid}", "volt", f"{label} rail voltage", mv / 1000, "V", 3, "AvgVoltage (SVI3)")
-            S(f"a.{sid}", "current", f"{label} rail current", float(a), "A", 1, cur_hint)
-            S(f"pwr.{sid}", "power", f"{label} rail power (V × I)", mv / 1000 * a, "W", 1, cur_hint)
+            S(f"a.{sid}", "current", f"{label} rail current", a, "A", 1, h)
+            S(f"pwr.{sid}", "power", f"{label} rail power (V × I)", None if a is None else mv / 1000 * a, "W", 1, h)
         for name in ("Hotspot GFX", "Hotspot SoC", "Liquid 0", "Liquid 1", "PLX"):
             v = m["AvgTemperature"][name]
             if v or name.startswith("Hotspot"):

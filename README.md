@@ -136,7 +136,9 @@ on that card the driver exposed no SMU I2C bus, so meat3 found no VRM controller
   power per rail (GFX, SoC, VDDCI, VDDIO), VDDCI voltage, GFX and SoC hotspots, GFX target clock,
   fabric clock, PCIe busy, and the share of time each limit (power, current, every temperature,
   voltage max) held the card back. It never talks to the firmware. Checked on a real ASUS RX 9070 XT
-  (VBIOS 115-G295BP00-100): rail currents are in mA, confirmed at idle but not yet under load.
+  (VBIOS 115-G295BP00-100): rail currents are in mA. The GFX value is a 16-bit count that wraps every 65.5 A under load;
+  meat3 works out the wrap count from board power (on that card, 345 W load: 30.3 A raw = 227 A real)
+  and shows "—" if board power can't decide it.
 - **VRM telemetry over PMBus.** The voltage regulators at 0x22/0x24/0x26 on the GPU's own "AMDGPU SMU"
   I2C buses: measured voltage, current, power and temperature per rail, plus input voltage/current.
   **Real power (VRM measured)** is the larger of the 12 V input power into the regulators and the

@@ -562,7 +562,7 @@ class TestRdna4Extras(TreeCase):
         thr[14] = 37                                          # PPT0
         tbl = F.build({"AverageTotalBoardPower": 331, "AverageSocketPower": 290,
                        "AverageGfxclkFrequencyTarget": 3010, "AvgVoltage": (1050, 750, 850, 1350),
-                       "AvgCurrent": (24000, 3000, 500, 1200), "AvgTemperature": (60, 78, 80, 70) + (0,) * 8,
+                       "AvgCurrent": (240000 % 65536, 30000, 5000, 12000), "AvgTemperature": (60, 78, 80, 70) + (0,) * 8,
                        "ThrottlingPercentage": thr, "VmaxThrottlingPercentage": 12, "serial": (0xBEEF, 0x12)})
         d = os.path.join(self.root, "sys/kernel/debug/meat3_smu")
         os.makedirs(d)
@@ -571,14 +571,31 @@ class TestRdna4Extras(TreeCase):
         ss = {s.id: s for s in self.be.sensors()}
         self.assertIn("serial 000000120000BEEF", ss["amdgpu0.fm.status"].label)
         self.assertEqual(ss["amdgpu0.fm.pwr.tbp"].value, 331)
-        self.assertEqual(ss["amdgpu0.fm.a.vdd_gfx"].value, 24)
-        self.assertAlmostEqual(ss["amdgpu0.fm.pwr.vdd_gfx"].value, 25.2)
+        self.assertEqual(ss["amdgpu0.fm.a.vdd_gfx"].value, 240)   # 3 wraps, from board power
+        self.assertAlmostEqual(ss["amdgpu0.fm.pwr.vdd_gfx"].value, 252.0)
         self.assertAlmostEqual(ss["amdgpu0.fm.v.vddci_mem"].value, 0.85)
         self.assertEqual(ss["amdgpu0.fm.t.hotspot_gfx"].value, 80)
         self.assertNotIn("amdgpu0.fm.t.liquid_0", ss)                 # zero = sensor not fitted
         self.assertEqual(ss["amdgpu0.fm.thr.ppt0"].value, 37)
         self.assertEqual(ss["amdgpu0.fm.thr.vmax"].value, 12)
         self.assertEqual(ss["amdgpu0.fm.clk.gfx_target"].value, 3010)
+
+    def test_gfx_current_unwrap_real_9070xt(self):
+        """Liam's ASUS RX 9070 XT: raw AvgCurrent mA, AvgVoltage mV, TotalBoardPower W."""
+        from meat3.backends import amdgpu_smu14_full as F
+        mv_idle = dict(zip(F.SVI_PLANES, (619, 888, 849, 1350)))
+        ma, k = F.unwrap_gfx_ma(dict(zip(F.SVI_PLANES, (3150, 6725, 14012, 9206))), mv_idle, 50)
+        self.assertEqual((ma, k), (3150, 0))
+        mv_load = dict(zip(F.SVI_PLANES, (1083, 887, 850, 1350)))
+        ma, k = F.unwrap_gfx_ma(dict(zip(F.SVI_PLANES, (30300, 20400, 15800, 20500))), mv_load, 345)
+        self.assertEqual(k, 3)
+        self.assertAlmostEqual(ma / 1000, 226.9, places=1)
+        # other rails alone exceed board power (bad sample) -> refuse to guess
+        self.assertEqual(F.unwrap_gfx_ma(dict(zip(F.SVI_PLANES, (30300, 20400, 15800, 20500))), mv_load, 40),
+                         (None, -1))
+        # leftover too big to be losses even with 0 wraps -> refuse
+        self.assertEqual(F.unwrap_gfx_ma(dict(zip(F.SVI_PLANES, (3150, 6725, 14012, 9206))), mv_idle, 100),
+                         (None, -1))
 
     def test_real_asus_9070xt_pptable(self):
         """Board pptable from a real ASUS RX 9070 XT VBIOS (115-G295BP00-100, 12/04/24; the copy at
