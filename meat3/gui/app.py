@@ -19,6 +19,7 @@ from meat3.gui.graphs import GraphsPage
 from meat3.gui.common import (THEMES, SensorStore, app_icon, apply_theme, install_none_refcount_guard,
                               paint_backdrop, setting_bool, settings, theme, theme_name)
 from meat3.gui.osd import OsdPage, OsdStyle, OverlayWindow
+from meat3.gui.overlay_proc import OverlayProxy, want_separate_process
 from meat3.gui.overclock import OverclockPage
 from meat3.gui.sensors import SensorsPage
 from meat3.gui.update import UpdateDialog
@@ -58,7 +59,10 @@ class MainWindow(QMainWindow):
         self.store = SensorStore(self)
         self.osd_style = OsdStyle()
         self.link = DaemonLink(socket_path, interval=min(1.0, self.osd_style.rate_ms / 1000), parent=self)
-        self.overlay = OverlayWindow(self.store, self.osd_style)
+        if want_separate_process(QApplication.platformName()):    # Wayland: corner placement needs X11
+            self.overlay = OverlayProxy(self.store, self.osd_style, socket_path, self)
+        else:
+            self.overlay = OverlayWindow(self.store, self.osd_style)
 
         central = QWidget()
         v = QVBoxLayout(central)
@@ -339,6 +343,7 @@ class MainWindow(QMainWindow):
         st.sync()
         self.store.stop_log()
         self.overlay.hide()
+        self.overlay.close()
         self.link.stop()
 
     def quit(self):
