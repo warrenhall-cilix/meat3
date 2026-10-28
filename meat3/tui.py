@@ -288,9 +288,9 @@ class Tui:
         self.put(0, max(x, w - len(info)), info, self.cp["head"])
         body_h = h - 2
         keys = {0: "Tab views  o OSD  r reset stats  u update  q quit",
-                1: "↑↓ PgUp/PgDn scroll  / filter  Esc clear  o OSD  r reset  q quit",
-                2: "↑↓ scroll  o OSD  r reset  q quit",
-                3: "↑↓ select  Enter set value  o OSD  q quit"}[self.view]
+                1: "↑↓ PgUp/PgDn scroll  / filter  Esc clear  o OSD  r reset  u update  q quit",
+                2: "↑↓ scroll  o OSD  r reset  u update  q quit",
+                3: "↑↓ select  Enter set value  o OSD  u update  q quit"}[self.view]
         status = self.msg if self.msg and time.time() - self.msg_t < 6 else keys
         self.put(h - 1, 0, " " * (w - 1), self.cp["dim"])
         self.put(h - 1, 1, status, self.cp["accent"] if status == self.msg else self.cp["dim"])
