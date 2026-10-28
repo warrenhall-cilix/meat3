@@ -62,7 +62,7 @@ def _run(tmp: Path, sock: str, osd_file: str, mock):
     from PySide6.QtWidgets import QApplication
 
     from meat3.gui.app import MainWindow
-    from meat3.gui.common import apply_theme
+    from meat3.gui.common import apply_theme, theme
 
     from meat3.gui.common import install_none_refcount_guard
 
@@ -338,14 +338,23 @@ def _exercise(app, w, tmp, sock, osd_file, mock):
     _wait(app, lambda: w.link.osd.get("enabled") is True and w.overlay.isVisible(), 5, "osd re-enabled")
 
     # light theme screenshot
-    w.act_dark.setChecked(False)
+    w.theme_actions["light"].trigger()
     w.tabs.setCurrentIndex(0)
     _pump(app, 1.2)
     w.grab().save(str(SHOTS / "sensors-light.png"))
     w.tabs.setCurrentIndex(2)
     _pump(app, 0.3)
     w.grab().save(str(SHOTS / "overclock-light.png"))
-    w.act_dark.setChecked(True)
+    # Liquid Ass theme screenshots (every tab)
+    from meat3.gui.common import theme
+    w.theme_actions["liquid"].trigger()
+    assert theme().glass and w.theme_actions["liquid"].isChecked()
+    for idx, nm in ((0, "sensors"), (1, "cores"), (2, "overclock"), (3, "osd")):
+        w.tabs.setCurrentIndex(idx)
+        _pump(app, 0.6)
+        w.grab().save(str(SHOTS / f"{nm}-liquid.png"))
+    w.theme_actions["dark"].trigger()
+    assert not theme().glass
     w.tabs.setCurrentIndex(0)
 
     # --- daemon goes away: banner, '—'-safe, and recovery

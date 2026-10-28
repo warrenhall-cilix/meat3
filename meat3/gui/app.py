@@ -8,15 +8,15 @@ import time
 from typing import Optional
 
 from PySide6.QtCore import QByteArray, QTimer
-from PySide6.QtGui import QKeySequence
+from PySide6.QtGui import QActionGroup, QKeySequence, QPainter
 from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QMainWindow, QMenu,
                                QMessageBox, QPushButton, QStatusBar, QSystemTrayIcon, QTabWidget,
                                QVBoxLayout, QWidget)
 
 from meat3.gui.client import DaemonLink, default_socket_path
 from meat3.gui.cores import CoresPage
-from meat3.gui.common import (SensorStore, app_icon, apply_theme, install_none_refcount_guard,
-                              setting_bool, settings, theme)
+from meat3.gui.common import (THEMES, SensorStore, app_icon, apply_theme, install_none_refcount_guard,
+                              paint_backdrop, setting_bool, settings, theme, theme_name)
 from meat3.gui.osd import OsdPage, OsdStyle, OverlayWindow
 from meat3.gui.overclock import OverclockPage
 from meat3.gui.sensors import SensorsPage
@@ -47,7 +47,7 @@ class Banner(QFrame):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, socket_path: str, dark: bool = True):
+    def __init__(self, socket_path: str, dark="dark"):
         super().__init__()
         self.setWindowTitle(APP_TITLE)
         self.setWindowIcon(app_icon())
@@ -122,10 +122,15 @@ class MainWindow(QMainWindow):
         a = m.addAction("&Quit", self.quit)
         a.setShortcut(QKeySequence.Quit)
         m = mb.addMenu("&View")
-        self.act_dark = m.addAction("Dark theme")
-        self.act_dark.setCheckable(True)
-        self.act_dark.setChecked(dark)
-        self.act_dark.toggled.connect(self.set_dark)
+        tm = m.addMenu("Theme")
+        grp = QActionGroup(self)
+        self.theme_actions = {}
+        for key, label in THEMES.items():
+            a = tm.addAction(label, lambda k=key: self.set_theme(k))
+            a.setCheckable(True)
+            a.setChecked(key == theme_name(dark))
+            grp.addAction(a)
+            self.theme_actions[key] = a
         m.addSeparator()
         for i, name in enumerate(("Sensors", "Cores", "Overclock", "OSD")):
             a = m.addAction(name, lambda i=i: self.tabs.setCurrentIndex(i))
@@ -171,12 +176,29 @@ class MainWindow(QMainWindow):
         if self.tray:
             self.tray_show.setText("Show window")
 
-    def set_dark(self, dark: bool):
-        apply_theme(dark)
-        settings().setValue("theme/dark", dark)
+    def set_dark(self, dark: bool):          # legacy entry point
+        self.set_theme("dark" if dark else "light")
+
+    def set_theme(self, name: str):
+        name = theme_name(name)
+        apply_theme(name)
+        st = settings()
+        st.setValue("theme/name", name)
+        st.setValue("theme/dark", name != "light")
+        if name in getattr(self, "theme_actions", {}):
+            self.theme_actions[name].setChecked(True)
+        self.update()
         self.sensors.model.repaint_all()      # colours are computed in data(); keep expansion
         self.overclock.signature = ()       # rebuild rows so danger colours follow the theme
         self.overclock.refresh()
+
+    def paintEvent(self, e):
+        if theme().glass:
+            p = QPainter(self)
+            paint_backdrop(p, self.rect())
+            p.end()
+        else:
+            super().paintEvent(e)
 
     def _about(self):
         QMessageBox.about(self, "About meat³",
@@ -299,6 +321,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--light", action="store_true", help="start with the light theme")
     g.add_argument("--dark", action="store_true", help="start with the dark theme")
+    g.add_argument("--theme", choices=list(THEMES), help="dark, light or liquid (Liquid Ass)")
     ap.add_argument("--hidden", action="store_true", help="start minimised to the tray")
     args, qt_args = ap.parse_known_args(argv)
     QApplication.setApplicationName("meat3")
@@ -309,9 +332,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     app.setWindowIcon(app_icon())
     app.setQuitOnLastWindowClosed(False)
     st = settings()
-    dark = True if args.dark else False if args.light else setting_bool(st, "theme/dark", True)
-    apply_theme(dark)
-    w = MainWindow(args.socket, dark)
+    if args.theme or args.dark or args.light:
+        name = args.theme or ("dark" if args.dark else "light")
+    else:
+        name = st.value("theme/name") or ("dark" if setting_bool(st, "theme/dark", True) else "light")
+    name = theme_name(name)
+    apply_theme(name)
+    w = MainWindow(args.socket, name)
     w.start()
     if not (args.hidden and w.tray is not None):
         w.show()

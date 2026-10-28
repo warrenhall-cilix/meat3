@@ -48,10 +48,48 @@ def setting_bool(s: QSettings, key: str, default: bool) -> bool:
 
 # ----------------------------------------------------------------------------- theme
 
+THEMES = {"dark": "Dark", "light": "Light", "liquid": "Liquid Ass"}
+
+
+def theme_name(v) -> str:
+    """Accepts a theme name or the legacy dark bool."""
+    if isinstance(v, bool):
+        return "dark" if v else "light"
+    v = str(v or "dark").lower().replace(" ", "")
+    if v in ("liquidass", "liquidglass", "glass"):
+        return "liquid"
+    return v if v in THEMES else "dark"
+
+
+def _rgba(c: QColor) -> str:
+    return f"rgba({c.red()},{c.green()},{c.blue()},{c.alpha()})"
+
+
 class Theme:
-    def __init__(self, dark: bool):
+    def __init__(self, name="dark"):
+        self.name = theme_name(name)
+        self.glass = self.name == "liquid"
+        dark = self.name != "light"
         self.dark = dark
-        if dark:
+        if self.glass:
+            # "Liquid Ass": translucent glass over a painted liquid backdrop (paint_backdrop)
+            self.window = QColor("#16131f")          # opaque: popups / fallbacks
+            self.base = QColor(255, 255, 255, 18)
+            self.alt = QColor(255, 255, 255, 9)
+            self.text = QColor("#f5f3fb")
+            self.dim = QColor("#b9b4cc")
+            self.button = QColor(255, 255, 255, 30)
+            self.border = QColor(255, 255, 255, 46)
+            self.accent = QColor("#ff8a65")
+            self.select = QColor(255, 255, 255, 52)
+            self.device_bg = QColor(255, 255, 255, 26)
+            self.card = QColor(255, 255, 255, 20)
+            self.amber = QColor("#ffc857")
+            self.red = QColor("#ff6b6b")
+            self.green = QColor("#6ee7a0")
+            self.throttle_bg = QColor(255, 90, 90, 60)
+            self.modified_bg = QColor(255, 138, 101, 40)
+        elif dark:
             self.window = QColor("#1c1e23")
             self.base = QColor("#16181c")
             self.alt = QColor("#1c1f24")
@@ -115,6 +153,8 @@ class Theme:
         return p
 
     def stylesheet(self) -> str:
+        if self.glass:
+            return self.glass_stylesheet()
         c = {k: v.name() for k, v in vars(self).items() if isinstance(v, QColor)}
         a = ASSETS.as_posix()
         return f"""
@@ -173,16 +213,161 @@ QScrollArea {{ border: none; }}
 """
 
 
-_theme = Theme(True)
+    def glass_stylesheet(self) -> str:
+        """Liquid Glass-style material: translucent fill with a top-lit sheen gradient, a bright
+        specular rim on the upper edge, softer rim elsewhere, big radii and capsule controls.
+        Everything sits over the backdrop that MainWindow paints (paint_backdrop)."""
+        a = ASSETS.as_posix()
+        txt, dim, acc = self.text.name(), self.dim.name(), self.accent.name()
+        glass = ("qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(255,255,255,40), "
+                 "stop:0.45 rgba(255,255,255,16), stop:1 rgba(255,255,255,10))")
+        glass_hi = ("qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(255,255,255,70), "
+                    "stop:1 rgba(255,255,255,26))")
+        rim = ("border: 1px solid rgba(255,255,255,40); border-top: 1px solid rgba(255,255,255,120); "
+               "border-left: 1px solid rgba(255,255,255,64);")
+        popup = "#221d30"
+        return f"""
+QMainWindow, QMenuBar, QStatusBar, QToolBar, QTabWidget, QStackedWidget, QScrollArea,
+QScrollArea > QWidget > QWidget {{ background: transparent; }}
+QMenuBar {{ color: {txt}; padding: 2px 6px; }}
+QMenuBar::item {{ padding: 4px 10px; border-radius: 10px; background: transparent; }}
+QMenuBar::item:selected {{ background: rgba(255,255,255,40); }}
+QMenu {{ background: {popup}; color: {txt}; border: 1px solid rgba(255,255,255,60); border-radius: 12px; padding: 6px; }}
+QMenu::item {{ padding: 5px 22px 5px 14px; border-radius: 8px; }}
+QMenu::item:selected {{ background: rgba(255,255,255,40); }}
+QMenu::separator {{ height: 1px; background: rgba(255,255,255,40); margin: 4px 8px; }}
+QToolTip {{ color: {txt}; background: {popup}; border: 1px solid rgba(255,255,255,70); border-radius: 8px; padding: 6px; }}
+QTabWidget::pane {{ border: none; background: transparent; }}
+QTabBar {{ background: transparent; }}
+QTabBar::tab {{ padding: 6px 20px; margin: 6px 3px 6px 3px; border-radius: 15px; color: {dim};
+    background: rgba(255,255,255,14); border: 1px solid rgba(255,255,255,24); }}
+QTabBar::tab:selected {{ color: {txt}; background: {glass_hi}; {rim} }}
+QTabBar::tab:hover:!selected {{ color: {txt}; background: rgba(255,255,255,30); }}
+QToolBar {{ border: none; spacing: 6px; padding: 4px 6px; }}
+QToolButton {{ padding: 4px 12px; border-radius: 13px; color: {txt}; background: rgba(255,255,255,16);
+    border: 1px solid rgba(255,255,255,30); border-top-color: rgba(255,255,255,70); }}
+QToolButton:hover {{ background: rgba(255,255,255,36); }}
+QToolButton:checked {{ background: rgba(255,138,101,90); border-color: rgba(255,190,170,160); }}
+QTreeView, QTableWidget, QTableView, QListWidget, QPlainTextEdit {{ background: {glass}; color: {txt};
+    alternate-background-color: rgba(255,255,255,10); {rim} border-radius: 16px;
+    selection-background-color: rgba(255,255,255,56); selection-color: {txt}; gridline-color: rgba(255,255,255,20); }}
+QTreeView::item, QTableView::item {{ padding: 1px 0px; }}
+QTreeView::item:hover, QTableView::item:hover {{ background: rgba(255,255,255,20); }}
+QHeaderView {{ background: transparent; }}
+QHeaderView::section {{ background: transparent; color: {dim}; border: none;
+    border-bottom: 1px solid rgba(255,255,255,40); padding: 6px 8px; }}
+QTableCornerButton::section {{ background: transparent; border: none; }}
+QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{ padding: 4px 10px; color: {txt}; border-radius: 12px;
+    background: rgba(255,255,255,22); border: 1px solid rgba(255,255,255,40); border-top-color: rgba(255,255,255,90); }}
+QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{ border-color: {acc}; }}
+QPushButton {{ padding: 5px 16px; color: {txt}; border-radius: 14px; background: {glass_hi};
+    border: 1px solid rgba(255,255,255,50); border-top-color: rgba(255,255,255,140); }}
+QPushButton:hover {{ background: rgba(255,255,255,70); }}
+QPushButton:pressed {{ background: rgba(255,255,255,30); }}
+QPushButton:disabled {{ color: {dim}; background: rgba(255,255,255,10); border-color: rgba(255,255,255,20); }}
+QPushButton#primary {{ color: white; border-color: rgba(255,200,180,170);
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #ffab8a, stop:1 #ff6f4d); }}
+QPushButton#primary:disabled {{ background: rgba(255,255,255,14); color: {dim}; border-color: rgba(255,255,255,20); }}
+QGroupBox {{ background: {glass}; {rim} border-radius: 18px; margin-top: 16px; padding: 12px 10px 10px 10px; color: {txt}; }}
+QGroupBox::title {{ subcontrol-origin: margin; left: 14px; padding: 0 6px; color: {txt}; font-weight: bold; }}
+QFrame#card {{ background: {glass}; {rim} border-radius: 18px; }}
+QSlider::groove:horizontal {{ height: 6px; background: rgba(255,255,255,30); border-radius: 3px; }}
+QSlider::sub-page:horizontal {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #ff8a65, stop:1 #ff5fa2); border-radius: 3px; }}
+QSlider::sub-page:horizontal:disabled {{ background: rgba(255,255,255,30); }}
+QSlider::handle:horizontal {{ width: 18px; margin: -7px 0; border-radius: 9px;
+    background: qradialgradient(cx:0.35, cy:0.3, radius:0.9, fx:0.35, fy:0.3, stop:0 white, stop:1 #d9d4e8);
+    border: 1px solid rgba(255,255,255,160); }}
+QSlider::handle:horizontal:disabled {{ background: rgba(255,255,255,60); }}
+QFrame#banner {{ background: rgba(255,107,107,50); border: 1px solid rgba(255,140,140,160); border-radius: 14px; }}
+QAbstractSpinBox::up-button {{ subcontrol-origin: border; subcontrol-position: top right; width: 18px;
+    border: none; border-top-right-radius: 12px; background: transparent; }}
+QAbstractSpinBox::down-button {{ subcontrol-origin: border; subcontrol-position: bottom right; width: 18px;
+    border: none; border-bottom-right-radius: 12px; background: transparent; }}
+QAbstractSpinBox::up-button:hover, QAbstractSpinBox::down-button:hover {{ background: rgba(255,255,255,40); }}
+QAbstractSpinBox::up-arrow {{ image: url({a}/arrow-up.svg); width: 9px; height: 9px; }}
+QAbstractSpinBox::down-arrow {{ image: url({a}/arrow-down.svg); width: 9px; height: 9px; }}
+QAbstractSpinBox::up-arrow:disabled, QAbstractSpinBox::down-arrow:disabled {{ image: none; }}
+QComboBox::drop-down {{ border: none; width: 24px; }}
+QComboBox::down-arrow {{ image: url({a}/arrow-down.svg); width: 10px; height: 10px; }}
+QComboBox QAbstractItemView {{ background: {popup}; color: {txt}; border: 1px solid rgba(255,255,255,60);
+    selection-background-color: rgba(255,255,255,50); }}
+QCheckBox {{ color: {txt}; }}
+QCheckBox::indicator {{ width: 16px; height: 16px; border-radius: 8px; background: rgba(255,255,255,24);
+    border: 1px solid rgba(255,255,255,90); }}
+QCheckBox::indicator:checked {{ background: {acc}; border-color: rgba(255,210,195,200); image: url({a}/check.svg); }}
+QCheckBox::indicator:disabled {{ background: rgba(255,255,255,8); border-color: rgba(255,255,255,30); }}
+QScrollBar:vertical {{ background: transparent; width: 10px; margin: 4px 2px; }}
+QScrollBar::handle:vertical {{ background: rgba(255,255,255,70); border-radius: 3px; min-height: 30px; }}
+QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 2px 4px; }}
+QScrollBar::handle:horizontal {{ background: rgba(255,255,255,70); border-radius: 3px; min-width: 30px; }}
+QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::sub-page {{ background: none; border: none; width: 0; height: 0; }}
+QListWidget::item {{ padding: 3px 4px; }}
+QLabel {{ color: {txt}; background: transparent; }}
+QLabel#cardTitle {{ font-weight: bold; }}
+QLabel#bannerText {{ color: {txt}; }}
+QLabel#dim {{ color: {dim}; }}
+QStatusBar {{ color: {dim}; }}
+QStatusBar QLabel {{ color: {dim}; }}
+QScrollArea {{ border: none; }}
+"""
+
+
+_backdrop_cache: dict = {}
+
+
+def paint_backdrop(p: QPainter, rect) -> None:
+    """The 'liquid' behind the glass: deep base + large soft colour blobs + a diagonal sheen.
+    Rendered once per size into a cached pixmap (cheap to blit on every repaint)."""
+    w, h = max(1, rect.width()), max(1, rect.height())
+    pm = _backdrop_cache.get((w, h))
+    if pm is None:
+        _backdrop_cache.clear()
+        pm = QPixmap(w, h)
+        q = QPainter(pm)
+        q.setRenderHint(QPainter.Antialiasing)
+        from PySide6.QtGui import QLinearGradient, QRadialGradient
+        base = QLinearGradient(0, 0, w, h)
+        base.setColorAt(0.0, QColor("#120c22"))
+        base.setColorAt(0.55, QColor("#1a0f2e"))
+        base.setColorAt(1.0, QColor("#071a2a"))
+        q.fillRect(0, 0, w, h, base)
+        blobs = [  # (x, y, radius as fraction of the larger side, colour, alpha)
+            (0.12, 0.18, 0.55, "#ff6a3d", 150),   # meat orange
+            (0.85, 0.12, 0.45, "#c13cff", 120),   # magenta
+            (0.70, 0.85, 0.60, "#1fb6ff", 115),   # cyan
+            (0.25, 0.92, 0.40, "#3b5bff", 110),   # blue
+            (0.52, 0.45, 0.35, "#ff4f9a", 70),    # pink core
+        ]
+        big = max(w, h)
+        for x, y, r, col, al in blobs:
+            g = QRadialGradient(QPointF(x * w, y * h), r * big)
+            c0 = QColor(col)
+            c0.setAlpha(al)
+            c1 = QColor(col)
+            c1.setAlpha(0)
+            g.setColorAt(0.0, c0)
+            g.setColorAt(0.55, QColor(c0.red(), c0.green(), c0.blue(), al // 3))
+            g.setColorAt(1.0, c1)
+            q.fillRect(0, 0, w, h, g)
+        sheen = QLinearGradient(0, 0, w * 0.6, h)
+        sheen.setColorAt(0.0, QColor(255, 255, 255, 26))
+        sheen.setColorAt(0.35, QColor(255, 255, 255, 0))
+        q.fillRect(0, 0, w, h, sheen)
+        q.end()
+        _backdrop_cache[(w, h)] = pm
+    p.drawPixmap(rect.topLeft(), pm)
+
+
+_theme = Theme("dark")
 
 
 def theme() -> Theme:
     return _theme
 
 
-def apply_theme(dark: bool) -> Theme:
+def apply_theme(name="dark") -> Theme:
     global _theme
-    _theme = Theme(dark)
+    _theme = Theme(name)
     app = QApplication.instance()
     app.setStyle("Fusion")
     app.setPalette(_theme.palette())
