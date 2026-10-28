@@ -251,7 +251,12 @@ class VrmAccess:
                     detect_profile(mfr, model)
                 self.controllers.append(Controller(bus_no, addr, mfr, model, rev, prof))
         if not self.controllers:
-            self.error = "no PMBus VRM controller answered at 0x22/0x24/0x26"
+            # Real ASUS RX 9070 XT (kernel 7.2): a full read scan of both "AMDGPU SMU" buses found no
+            # device at any address, so on RDNA4 the regulators look reachable only by the GPU firmware.
+            self.error = ("no PMBus VRM controller answered at 0x22/0x24/0x26. On a real RX 9070 XT the GPU's "
+                          "SMU I2C buses answer at no address at all, so RDNA4 regulators appear to be "
+                          "reachable only by the GPU firmware. VRM telemetry and offsets are unavailable; "
+                          "the driver's own voltage offset (Overclock tab, meat3-gputune) still works")
         self._load_factory()
 
     def _key(self, c: Controller, page: int) -> str:

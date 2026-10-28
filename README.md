@@ -127,8 +127,10 @@ Keys: `Tab` cycles views, `o` toggles the OSD, `r` resets stats, `q` quits. Uses
 ## RX 9070 / 9070 XT (RDNA4) extras
 
 Everything below is RDNA4-only. Monitoring and the hidden-metrics module have run on a real ASUS
-RX 9070 XT (Manjaro, kernel 7.2). VRM telemetry and the VRM, SKU-table and undervolt tools have not:
-on that card the driver exposed no SMU I2C bus, so meat3 found no VRM controllers.
+RX 9070 XT (Manjaro, kernel 7.2). The VRM features below have not: that card's "AMDGPU SMU" I2C buses
+answer at no address at all (full read scan), so on RDNA4 the regulators look reachable only by the GPU
+firmware. `meat3-gputune` doesn't need them; it uses the driver's own voltage offset. The SKU-table
+tool is still untested on hardware.
 
 - **Hidden firmware metrics.** `kmod/meat3_smu` (installed via DKMS automatically when an RDNA4 card
   is present, or with `install.sh --kmod`) copies the firmware's full metrics table that amdgpu

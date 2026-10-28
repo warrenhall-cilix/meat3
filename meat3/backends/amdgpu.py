@@ -918,7 +918,7 @@ class AmdGpuBackend(Backend):
             return []
         P, G = self.prefix, f"{self.name}/VRM (PMBus)"
         if not v.controllers:
-            return [Sensor(f"{P}.vrm.status", G, "VRM controllers: none found", None, hint=v.error or "")]
+            return [Sensor(f"{P}.vrm.status", G, "VRM controllers: not reachable", None, hint=v.error or "")]
         data = v.read_all()
         pw = vrmm.VrmAccess.power_summary(data)
         board = next((self._seen_rows.get(k, {}).get("value") for k in ("average_socket_power", "curr_socket_power")
