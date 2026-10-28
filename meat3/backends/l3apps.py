@@ -327,7 +327,7 @@ class L3Apps:
             if not a.group:
                 continue
             apps.append({"key": a.key, "name": a.name, "game": a.game, "cpu": a.cpu_ema,
-                         "procs": len(a.pids), "threads": len(a.assigned),
+                         "procs": len(a.pids), "threads": len(a.assigned), "pids": list(a.pids),
                          "occ": self._occupancy(os.path.join(a.parent, "mon_groups", a.group))})
         apps.sort(key=lambda r: -sum(v or 0 for v in r["occ"].values()))
         total: dict[int, Optional[int]] = {}

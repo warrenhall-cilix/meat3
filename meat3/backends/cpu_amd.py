@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import fcntl
 import glob
 import os
 import platform
@@ -121,7 +122,7 @@ PERF_FLAG_FD_CLOEXEC = 8
 
 
 class PerfEvents:
-    """Minimal perf_event_open(2) wrapper (counting mode, system-wide on one cpu).
+    """Minimal perf_event_open(2) wrapper (counting mode: system-wide on one cpu, or one thread).
 
     Tests substitute an object with the same open/read/close interface."""
 
@@ -134,7 +135,8 @@ class PerfEvents:
         except OSError:
             pass
 
-    def open(self, pmu_type: int, config: int, cpu: int, read_format: int = 0) -> int:
+    def open(self, pmu_type: int, config: int, cpu: int, read_format: int = 0, pid: int = -1,
+             group_fd: int = -1, disabled: bool = False) -> int:
         if self.nr is None or self.libc is None:
             raise OSError(errno.ENOSYS, "perf_event_open unsupported on this arch")
         attr = _PerfAttr()
@@ -142,8 +144,9 @@ class PerfEvents:
         attr.size = ctypes.sizeof(_PerfAttr)
         attr.config = config
         attr.read_format = read_format
-        fd = self.libc.syscall(ctypes.c_long(self.nr), ctypes.byref(attr), ctypes.c_int(-1),
-                               ctypes.c_int(cpu), ctypes.c_int(-1), ctypes.c_ulong(PERF_FLAG_FD_CLOEXEC))
+        attr.flags = 1 if disabled else 0           # bit 0: disabled
+        fd = self.libc.syscall(ctypes.c_long(self.nr), ctypes.byref(attr), ctypes.c_int(pid),
+                               ctypes.c_int(cpu), ctypes.c_int(group_fd), ctypes.c_ulong(PERF_FLAG_FD_CLOEXEC))
         if fd < 0:
             e = ctypes.get_errno()
             raise OSError(e, os.strerror(e))
@@ -163,6 +166,12 @@ class PerfEvents:
         except OSError:
             return None
         return struct.unpack("<QQQ", b) if len(b) == 24 else None
+
+    def ioctl(self, fd: int, request: int, arg: int = 0) -> None:
+        try:
+            fcntl.ioctl(fd, request, arg)
+        except OSError:
+            pass
 
     def close(self, fd: int) -> None:
         try:
@@ -301,6 +310,20 @@ class UncoreCounters:
 
 # --------------------------------------------------------------------------- the backend
 
+APP_MODES = ("off", "game", "all")
+
+
+def _raise_nofile() -> None:
+    """Soft fd limit up to the hard limit (systemd services default to 1024 soft)."""
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft < hard:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (min(hard, 1 << 16), hard))
+    except (ImportError, ValueError, OSError):
+        pass
+
+
 def zen_generation(family: int, model: int) -> str:
     if family == 0x17:
         return "Zen 2" if model >= 0x30 else "Zen/Zen+"
@@ -427,8 +450,17 @@ class AmdCpuBackend(Backend):
             perf = PerfEvents()
         self.uncore = UncoreCounters(sys_root, perf, self.family, self.model, clock)
         self.resctrl = ResctrlL3(sys_root, self.env, clock)
-        td_on = (config.get().get("cpu_topdown") or {}).get("enabled", True) and self.env.get("MEAT3_NO_TOPDOWN") != "1"
+        tdc = config.get().get("cpu_topdown") or {}
+        td_on = tdc.get("enabled", True) and self.env.get("MEAT3_NO_TOPDOWN") != "1"
         self.topdown = cpu_topdown.TopDown(perf, self.topo.cores, self.family, self.model, clock) if td_on else None
+        self.app_pipe = None
+        self.app_mode = tdc.get("per_app", "game") if tdc.get("per_app", "game") in APP_MODES else "game"
+        if td_on and perf is not None:
+            _raise_nofile()                     # a counter group per hot thread of each tracked program
+            self.app_pipe = cpu_topdown.AppPipeline(perf, self.family, self.model, clock, proc_root,
+                                                    max_threads=int(tdc.get("max_threads", 16)),
+                                                    min_thread_pct=float(tdc.get("min_thread_pct", 1.0)),
+                                                    max_switches=float(tdc.get("max_switches", 20000)))
         self.msr_prev: dict[tuple[int, int], tuple[float, int]] = {}
         self.energy_unit: Optional[float] = None
         self.energy_rates = cc.RateTracker(wrap=1 << 32)
@@ -595,6 +627,7 @@ class AmdCpuBackend(Backend):
         out += self._uncore(pm)
         out += self._l3_occupancy(now)
         out += self._pipeline()
+        self._pipeline_turn()
         out += self._misc()
         return out
 
@@ -611,6 +644,29 @@ class AmdCpuBackend(Backend):
                ("badspec", "bad_spec", "bad speculation", "%", 1,
                 "slots spent on ops that were thrown away (mispredicts); the remainder of the other buckets"))
 
+    def _pipeline_turn(self) -> None:
+        """Per-core and per-program counters can't run together (CPU-wide events always win), so
+        while programs are counted the two views take turns, one sample each."""
+        td, ap = self.topdown, self.app_pipe
+        if td is None:
+            return
+        if ap is None or not ap.counting:
+            td.set_enabled(True)
+            if ap is not None:
+                ap.set_enabled(False)
+            return
+        # switch the active side off first so the two never overlap (that would read as multiplexing)
+        if td.enabled:
+            td.set_enabled(False)
+            ap.set_enabled(True)
+        else:
+            ap.set_enabled(False)
+            td.set_enabled(True)
+
+    @property
+    def _taking_turns(self) -> bool:
+        return self.app_pipe is not None and self.app_pipe.counting
+
     def _pipeline(self) -> list[Sensor]:
         """Per-core IPC and top-down stall breakdown (cpu_topdown.py)."""
         td = self.topdown
@@ -621,6 +677,8 @@ class AmdCpuBackend(Backend):
         rows = [r for r in self.TD_ROWS if r[0] == "ipc" or td.width]
         width_txt = f"{td.width} slots/cycle" if td.width else "IPC only before Zen 4"
         note = "; counters time-shared (another perf user or NMI watchdog), values scaled" if td.multiplexed else ""
+        if self._taking_turns:
+            note += "; takes turns with the per-app counters, so it updates every other second"
         err = f"; {td.error}" if td.error else ""
         # whole CPU: sum the raw deltas so busy cores weigh more
         tot: dict[str, float] = {}
@@ -842,6 +900,48 @@ class AmdCpuBackend(Backend):
         if a.error:
             out[-1].hint += f"; note: {a.error}"
         out += self._l3_reserve_sensors(g)
+        out += self._app_pipeline(res["apps"], game)
+        return out
+
+    def _app_pipeline(self, apps: list[dict], game: Optional[dict]) -> list[Sensor]:
+        """IPC / stall breakdown per tracked program (and for 'the game'), from per-thread counters."""
+        ap = self.app_pipe
+        if ap is None:
+            return []
+        counted = [] if self.app_mode == "off" else apps if self.app_mode == "all" else ([game] if game else [])
+        res = ap.update([{"key": r["key"], "pids": r.get("pids") or []} for r in counted])
+        p, g, out = self.prefix, f"{self.g}/Pipeline by app", []
+        rows = [r for r in self.TD_ROWS if r[0] in ("ipc", "backend", "frontend") and (r[0] == "ipc" or ap.width)]
+        out.append(Sensor(f"{p}.pipe.app_cost", g, "Per-app counting cost (estimate)",
+                          ap.cost_pct if ap.counting else 0.0, "%", 2,
+                          "% of one CPU core spent switching the per-thread counters in and out: counted "
+                          f"threads' context switches/s x {cpu_topdown.SWITCH_COST_S * 1e6:.1f} us x half the "
+                          f"time. Mode: {self.app_mode} (Overclock → L3 cache → Per-app pipeline counters)"))
+
+        def hint_for(r: dict, h: str) -> str:
+            cov = r.get("coverage")
+            txt = (f"{h}; counted on {r.get('counted', 0)} of {r.get('threads', 0)} threads (the busy ones)"
+                   + (f", covering {cov:.0f}% of its CPU time" if cov is not None else ""))
+            if r.get("skipped_busy"):
+                txt += (f"; {r['skipped_busy']} busy thread(s) not counted: they switch more than "
+                        f"{ap.max_switches:.0f} times/s, which would make counting expensive")
+            if r.get("multiplexed"):
+                txt += "; counters time-shared with another perf user, extrapolated"
+            txt += "; takes turns with the per-core counters, so it updates every other second"
+            return txt + (f"; {ap.error}" if ap.error else "")
+
+        for a in counted:
+            r = res.get(a["key"], {})
+            sid = l3apps.slug(a["key"])
+            for key, rid, label, unit, dec, h in rows:
+                out.append(Sensor(f"{p}.l3app.{sid}.{rid}", g, f"{a['name']} {label}", r.get(key), unit, dec,
+                                  hint_for(r, h)))
+        r = res.get(game["key"], {}) if game else {}
+        for key, rid, label, unit, dec, h in rows:
+            out.append(Sensor(f"{p}.l3app.game.{rid}", g, f"Game {label}", r.get(key), unit, dec,
+                              (f"game: {game['name']}; " + hint_for(r, h)) if game and self.app_mode != "off" else
+                              "per-app counting is off" if self.app_mode == "off" else
+                              "no game running; follows whichever game is detected"))
         return out
 
     def _l3_reserve_sensors(self, g: str) -> list[Sensor]:
@@ -888,7 +988,7 @@ class AmdCpuBackend(Backend):
 
     # ------------------------------------------------------------------ controls
     def controls(self) -> list[Control]:
-        return (self.cpufreq.controls() + self._l3_controls()
+        return (self.cpufreq.controls() + self._l3_controls() + self._pipe_controls()
                 + amd_smu.smu_controls(self.smu, self.pmt, self.prefix, self.g, ncores=len(self.topo.cores)))
 
     def _l3_controls(self) -> list[Control]:
@@ -915,6 +1015,33 @@ class AmdCpuBackend(Backend):
                                f"Rounded to whole L3 ways ({wm:.0f} MB each of {r.ways}); the game gets the "
                                "rest. Smaller = more for the game, but background apps run from DRAM more."))
         return out
+
+    def _pipe_controls(self) -> list[Control]:
+        if self.app_pipe is None:
+            return []
+        return [Control(f"{self.prefix}.pipe.per_app", f"{self.g}/L3 cache", "Per-app pipeline counters", "choice",
+                        self.app_mode, choices=list(APP_MODES), default="game",
+                        available=self.resctrl.apps is not None,
+                        hint="IPC / back-end / front-end per program. Counting a thread costs ~1 us on each of "
+                             "its context switches (see 'Per-app counting cost'), so 'game' counts only the "
+                             "running game; 'all' adds the busiest apps. While anything is counted, the "
+                             "per-core and per-app views take turns and update every other second.")]
+
+    def _pipe_apply(self, value: Any) -> tuple[bool, str]:
+        if value not in APP_MODES:
+            return False, f"expected one of {', '.join(APP_MODES)}"
+        self.app_mode = value
+        cfg = config.get()
+        tc = dict(cfg.get("cpu_topdown") or {})
+        tc["per_app"] = value
+        cfg["cpu_topdown"] = tc
+        msg = {"off": "per-app counters off", "game": "counting the running game only",
+               "all": "counting the game and the busiest apps"}[value]
+        try:
+            config.save(cfg)
+        except OSError as e:
+            msg += f" (not saved: {e.strerror})"
+        return True, msg
 
     def _l3_apply(self, control_id: str, value: Any) -> tuple[bool, str]:
         r = self.resctrl.reserve
@@ -951,6 +1078,8 @@ class AmdCpuBackend(Backend):
             return self.cpufreq.apply(control_id, value)
         if control_id in (f"{self.prefix}.l3.reserve", f"{self.prefix}.l3.reserve_bg_mb"):
             return self._l3_apply(control_id, value)
+        if control_id == f"{self.prefix}.pipe.per_app" and self.app_pipe is not None:
+            return self._pipe_apply(value)
         if control_id.startswith(f"{self.prefix}.smu."):
             return amd_smu.smu_apply(self.smu, self.pmt, self.prefix, control_id, value,
                                      ncores=len(self.topo.cores))
@@ -961,6 +1090,8 @@ class AmdCpuBackend(Backend):
         self.uncore.close()
         if self.topdown:
             self.topdown.close()
+        if self.app_pipe:
+            self.app_pipe.close()
         if self.resctrl.apps:
             self.resctrl.apps.close()           # also releases the L3 reservation
         elif self.resctrl.reserve:

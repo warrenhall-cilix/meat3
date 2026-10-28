@@ -64,6 +64,15 @@ The buckets add up to 100%. They show in the Cores tab, under CPU → Pipeline s
 
 The counters run in counting mode (no sampling or interrupts). Reading all 96 on a 9800X3D takes about 0.1 ms per second, so it costs nothing measurable. If another tool such as `perf` holds counters, the kernel time-shares them and the values are scaled (the hint says so). Disable with `"cpu_topdown": {"enabled": false}`.
 
+**Per program:** IPC, back-end bound and front-end bound for the running game (or for the busiest apps too). These show in the Cores tab's **Apps** table next to each program's L3 use, and as Game IPC / back-end / front-end sensors that follow whichever game is running (good for the OSD). Choose **off / game / all** under Overclock → L3 cache → Per-app pipeline counters (default: game).
+
+Counting one program isn't free like the per-core view, so it's limited:
+- **Context-switch cost:** the kernel swaps a counted thread's counters in and out on every context switch. Measured on the 9800X3D: about 1.1 µs per switch with the 4 events used. The **Per-app counting cost** sensor estimates the live overhead as % of one core.
+- **Which threads:** only threads using ≥1% of a core are counted (up to 16 per program). Threads switching more than 20,000 times a second are skipped; the hint says how many, and what share of the program's CPU time is covered.
+- **Taking turns:** the CPU always schedules the per-core counters ahead of per-thread ones, so while a program is counted the two views alternate each second. Each view then updates every other second.
+
+On a context-switch torture test, a ping-pong between two threads at about 950k switches/s, counting every thread would cost 40–60%. In practice those threads are skipped, and with the daemon running the benchmark stayed within noise (459k vs 475k round trips/s). A compute-bound game thread costs nothing measurable.
+
 ### L3 cache by app and by game
 
 The **Cores** tab lists how much L3 each busy program is actually holding, live, in MB and as a share of the cache, plus "everything else".

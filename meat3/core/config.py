@@ -35,7 +35,11 @@ DEFAULTS = {
     # detection). Rounded to whole L3 ways (6 MB each on a 9800X3D), at most half the cache.
     "l3_reserve": {"enabled": True, "background_mb": 12},
     # Per-core IPC and pipeline stall breakdown from the core PMU (counting mode, negligible cost).
-    "cpu_topdown": {"enabled": True},
+    # per_app ("off" | "game" | "all"): IPC/back-end/front-end per program, counted on each program's
+    # busy threads (>= min_thread_pct of a core, at most max_threads, skipping threads that switch
+    # more than max_switches/s). Costs ~1 us per context switch of a counted thread.
+    "cpu_topdown": {"enabled": True, "per_app": "game", "max_threads": 16, "min_thread_pct": 1.0,
+                    "max_switches": 20000},
     # RDNA4 VRM controllers over PMBus (GPU's own "AMDGPU SMU" I2C buses, addresses 0x22/0x24/0x26).
     # Telemetry is read-only. Voltage offset writes are off unless allow_writes is true, and are
     # clamped to +-max_offset_mv. max_current_scale caps the current-reporting scale (raises the

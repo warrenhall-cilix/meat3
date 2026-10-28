@@ -541,6 +541,15 @@ class MockRyzen9800X3D(MockBackend):
             S("L3 by app", f"{P}.l3.reserve.game_mb", "L3 reserved for game", 96 - bg_mb if res else None, "MB", 0),
             S("L3 by app", f"{P}.l3.reserve.bg_mb", "L3 limit for everything else", bg_mb if res else None, "MB", 0),
         ]
+        out.append(S("Pipeline by app", f"{P}.pipe.app_cost", "Per-app counting cost (estimate)",
+                     0.4 * load + abs(n(0.02)), "%", 2))
+        g_be = 42 - (14 if res else 0) + n(2)
+        for k, nm, ipc, be, fe in (("steam_1091500", "Cyberpunk2077.exe", 1.4 + (0.35 if res else 0), g_be, 21),
+                                   ("firefox", "firefox", 1.1, 35, 38), ("game", "Game", 1.4 + (0.35 if res else 0),
+                                                                          g_be, 21)):
+            out += [S("Pipeline by app", f"{P}.l3app.{k}.ipc", f"{nm} IPC", ipc + n(0.05), "", 2),
+                    S("Pipeline by app", f"{P}.l3app.{k}.stall_be", f"{nm} back-end bound", be + n(1), "%", 1),
+                    S("Pipeline by app", f"{P}.l3app.{k}.stall_fe", f"{nm} front-end bound", fe + n(1), "%", 1)]
         out += [
             S("Temperatures", f"{P}.temp.tctl", "Tctl/Tdie", tctl, "°C", 1),
             S("Temperatures", f"{P}.temp.ccd1", "CCD1 (Tdie)", tctl - 3 + n(0.3), "°C", 1),

@@ -190,6 +190,7 @@ class CoresPage(QWidget):
 
     # ------------------------------------------------------------------ L3 by app
     APP_RE = re.compile(r"^(?P<p>.+)\.l3app\.(?P<k>[a-z0-9_]+)\.occupancy$")
+    APP_COLS = ["App", "L3 in use", "% of L3", "CPU", "IPC", "Back-end", "Front-end"]
 
     def _refresh_apps(self) -> None:
         sens = self.store.sensors
@@ -206,13 +207,14 @@ class CoresPage(QWidget):
                 other = s
             elif s.get("value") is not None:
                 cpu = sens.get(f"{pfx}.l3app.{k}.cpu", {}).get("value")
-                rows.append((s["value"], s["label"].removesuffix(" L3 in use"), cpu, s.get("hint", ""), sid))
+                rows.append((s["value"], s["label"].removesuffix(" L3 in use"), cpu, s.get("hint", ""), sid,
+                             f"{pfx}.l3app.{k}"))
         if pfx is None:
             return
         if self.app_table is None:
             self.app_title = QLabel()
-            t = QTableWidget(0, 4)
-            t.setHorizontalHeaderLabels(["App", "L3 in use", "% of L3", "CPU"])
+            t = QTableWidget(0, len(self.APP_COLS))
+            t.setHorizontalHeaderLabels(self.APP_COLS)
             t.setEditTriggers(QTableWidget.NoEditTriggers)
             t.setAlternatingRowColors(True)
             t.setFont(mono_font())
@@ -232,29 +234,37 @@ class CoresPage(QWidget):
                 if m:
                     size_mb = (size_mb or 0) + int(m.group(1)) * 1.048576
         if other is not None and other.get("value") is not None:
-            rows.append((other["value"], "Everything else", None, other.get("hint", ""), other.get("id")))
+            rows.append((other["value"], "Everything else", None, other.get("hint", ""), other.get("id"), None))
         rows.sort(key=lambda r: -r[0])
         gtxt = ""
         if game is not None and game.get("value") is not None:
             gname = (game.get("hint") or "").removeprefix("game: ").split(" (")[0]
             gtxt = f"  ·  <b>Game</b> {gname}: {game['value']:.1f} MB"
-        self.app_title.setText(f"<b>L3 by app</b> — live cache occupancy per program{gtxt}"
+        self.app_title.setText(f"<b>Apps</b> — live L3 cache use and pipeline stalls per program{gtxt}"
                                + reserve_text(sens, pfx))
         self.app_title.setToolTip(sens.get(f"{pfx}.l3.reserve.active", {}).get("hint", ""))
         t = self.app_table
         t.setRowCount(len(rows))
-        for i, (mb, name, cpu, hint, sid) in enumerate(rows):
+        for i, (mb, name, cpu, hint, sid, base) in enumerate(rows):
             cells = [name, f"{mb:.1f} MB", "—" if not size_mb else f"{100 * mb / size_mb:.0f}%",
                      "—" if cpu is None else f"{cpu:.1f}%"]
+            pipe_ids = [f"{base}.{x}" if base else None for x in ("ipc", "stall_be", "stall_fe")]
+            for pid_ in pipe_ids:
+                ps = sens.get(pid_, {}) if pid_ else {}
+                v = ps.get("value")
+                cells.append("—" if v is None else format_value(v, ps.get("decimals", 0), ps.get("unit", "")))
             for j, txt in enumerate(cells):
+                cell_sid, cell_hint = sid, hint
+                if j >= 4 and pipe_ids[j - 4] in sens:
+                    cell_sid, cell_hint = pipe_ids[j - 4], sens[pipe_ids[j - 4]].get("hint", "")
                 it = t.item(i, j)
                 if it is None:
                     it = QTableWidgetItem()
                     it.setTextAlignment((Qt.AlignLeft if j == 0 else Qt.AlignRight) | Qt.AlignVCenter)
                     t.setItem(i, j, it)
                 it.setText(txt)
-                it.setToolTip(hint)
-                it.setData(Qt.UserRole, sid)
+                it.setToolTip(cell_hint)
+                it.setData(Qt.UserRole, cell_sid)
         h = t.horizontalHeader().height() + t.verticalHeader().defaultSectionSize() * max(1, len(rows)) + 4
         t.setMinimumHeight(h)
         t.setMaximumHeight(h)

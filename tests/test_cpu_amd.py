@@ -44,12 +44,12 @@ class FakePerf:
         self.counts = {}
         self.closed = []
 
-    def open(self, typ, config, cpu, read_format=0):
+    def open(self, typ, config, cpu, read_format=0, pid=-1, group_fd=-1, disabled=False):
         if self.fail:
             raise OSError(13, "Permission denied")
         self.opened.append((typ, config, cpu))
         fd = len(self.opened) + 100
-        self.counts[fd] = [0, self.steps.get((typ, config), 0)]
+        self.counts[fd] = [0, self.steps.get((typ, config), 0), 0]
         return fd
 
     def read(self, fd):
@@ -57,6 +57,14 @@ class FakePerf:
         v = c[0]
         c[0] += c[1]
         return v
+
+    def ioctl(self, fd, request, arg=0):
+        pass
+
+    def read_scaled(self, fd):
+        t = self.counts[fd][2]
+        self.counts[fd][2] += 1_000_000_000
+        return self.read(fd), t, t
 
     def close(self, fd):
         self.closed.append(fd)
