@@ -535,7 +535,25 @@ class AmdGpuBackend(Backend):
         if self.mp1 and self.mp1[0] == 14 and "throttle_status" in self._seen_rows:
             out += self._smu14_throttle(current.get("throttle_status"))
         out += self._board_limits()
+        if self.is_apu and self.mp1 and tuple(self.mp1[:3]) == (13, 0, 5):
+            self._mark_apu_power_unreliable(out)
         return out
+
+    _APU_BAD_POWER = ("gm.average_socket_power", "gm.average_gfx_power", "gm.average_soc_power",
+                      "hwmon.power1_input", "hwmon.power1_average")
+
+    def _mark_apu_power_unreliable(self, out: list[Sensor]) -> None:
+        """MP1 13.0.5 (Raphael/Granite Ridge desktop iGPU): the metrics table's power fields do not
+        follow the header's meaning (Power[0]=VDDCR_VDD, Power[1]=VDDCR_SOC, CurrentSocketPower,
+        all mW). Measured on a 9800X3D: socket power 0.05-0.10 W, and "VDDCR_VDD" falls from 23 W to
+        10 W while package power rises from 30 W to 97 W under an all-core load. Only the SoC field
+        (~11.7 W) is in the right range (CPU-side VDDCR_SOC 10.4 W). Use the CPU's PM-table rows."""
+        for s in out:
+            if s.id.split(".", 1)[-1] in self._APU_BAD_POWER:
+                s.label += " (unreliable)"
+                s.hint = ("Desktop Ryzen iGPU firmware (MP1 13.0.5) does not fill this power field as "
+                          "documented; it does not track real power. Use the CPU's PM-table power rows "
+                          "(socket, VDDCR_CPU, VDDCR_SOC). " + (s.hint or ""))
 
     def _smu14_throttle(self, row: Optional[dict]) -> list[Sensor]:
         """SMU14 raw throttle_status decoded with THROTTLER_*_BIT names (smu14_driver_if_v14_0.h).
