@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Collect read-only AMD GPU info (VBIOS, power table, overdrive ranges, firmware versions, metrics)
+# into one tarball for meat3 development. Writes nothing to the GPU.
+#
+#   sudo bash collect_amdgpu.sh        -> ./amdgpu-dump-<host>-<date>.tar.gz
+set -u
+[ "$(id -u)" = 0 ] || { echo "run with sudo (the VBIOS copy is only readable by root)"; exit 1; }
+out="amdgpu-dump-$(hostname -s)-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$out"
+{ uname -a; echo; lspci -nn | grep -iE 'vga|display|3d'; echo; cat /proc/cpuinfo | grep -m1 'model name'; } > "$out/system.txt" 2>&1
+dmesg | grep -iE 'amdgpu|drm' > "$out/dmesg-amdgpu.txt" 2>&1
+
+for card in /sys/class/drm/card[0-9]*; do
+    dev="$card/device"
+    [ -f "$dev/vendor" ] && [ "$(cat "$dev/vendor")" = "0x1002" ] || continue
+    [[ "$card" =~ card[0-9]+$ ]] || continue
+    pci=$(basename "$(readlink -f "$dev")")
+    d="$out/$(basename "$card")-$pci"
+    mkdir -p "$d"
+    for f in device subsystem_vendor subsystem_device revision vbios_version current_link_speed current_link_width \
+             pp_table pp_od_clk_voltage pp_dpm_sclk pp_dpm_mclk pp_dpm_fclk pp_dpm_socclk pp_dpm_pcie \
+             pp_power_profile_mode pp_features power_dpm_force_performance_level gpu_metrics \
+             mem_info_vram_total mem_info_vram_vendor; do
+        [ -e "$dev/$f" ] && cat "$dev/$f" > "$d/$f" 2>/dev/null
+    done
+    [ -d "$dev/gpu_od" ] && cp -r "$dev/gpu_od" "$d/gpu_od" 2>/dev/null
+    [ -d "$dev/fw_version" ] && for f in "$dev"/fw_version/*; do echo "$(basename "$f")=$(cat "$f")"; done > "$d/fw_version.txt"
+    [ -d "$dev/ip_discovery/die/0" ] && for ip in "$dev"/ip_discovery/die/0/*/0; do
+        n=$(basename "$(dirname "$ip")"); [[ "$n" =~ ^[A-Z] ]] || continue
+        echo "$n $(cat "$ip/major").$(cat "$ip/minor").$(cat "$ip/revision")"; done > "$d/ip_versions.txt"
+    for h in "$dev"/hwmon/hwmon*; do
+        [ -d "$h" ] && for f in "$h"/*; do [ -f "$f" ] && [ -r "$f" ] && echo "$(basename "$f")=$(cat "$f" 2>/dev/null)"; done > "$d/hwmon.txt"
+    done
+    for dbg in /sys/kernel/debug/dri/*/; do
+        grep -q "$pci" "$dbg/name" 2>/dev/null || continue
+        cat "$dbg/amdgpu_vbios" > "$d/vbios.rom" 2>/dev/null
+        cat "$dbg/amdgpu_firmware_info" > "$d/firmware_info.txt" 2>/dev/null
+        timeout 5 cat "$dbg/amdgpu_pm_info" > "$d/pm_info.txt" 2>/dev/null
+        cat "$dbg/amdgpu_discovery" > "$d/discovery.bin" 2>/dev/null
+        break
+    done
+done
+tar czf "$out.tar.gz" "$out" && rm -rf "$out"
+echo "Done: $(pwd)/$out.tar.gz  ($(du -h "$out.tar.gz" | cut -f1)) - send this file over."
