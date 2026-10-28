@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <title>meat³</title>
+  <polygon points="30,8 54,20 30,32 6,20" fill="#f28b72"/>
+  <polygon points="6,20 30,32 30,60 6,48" fill="#d9573f"/>
+  <polygon points="30,32 54,20 54,48 30,60" fill="#a83a29"/>
+  <polyline points="6,20 30,32 54,20" fill="none" stroke="#ffd2c6" stroke-width="1" stroke-opacity="0.6"/>
+  <line x1="30" y1="32" x2="30" y2="60" stroke="#ffd2c6" stroke-width="1" stroke-opacity="0.35"/>
+  <text x="52" y="17" font-family="DejaVu Sans, Noto Sans, sans-serif" font-size="20" font-weight="bold"
+        text-anchor="middle" fill="#ffffff" stroke="#3a1610" stroke-width="2.4" paint-order="stroke">³</text>
+</svg>

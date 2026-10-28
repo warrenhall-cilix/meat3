@@ -1,0 +1,9 @@
+OD_FAN_CURVE:
+0: 40C 20%
+1: 55C 35%
+2: 70C 50%
+3: 85C 75%
+4: 95C 100%
+OD_RANGE:
+FAN_CURVE(hotspot temp): 25C 110C
+FAN_CURVE(fan speed): 15% 100%

@@ -1,0 +1,15 @@
+[Unit]
+Description=meat³ hardware monitor daemon (sensors, OSD, overclocking)
+After=multi-user.target nvidia-persistenced.service
+Wants=modprobe@i2c-dev.service
+
+[Service]
+Type=simple
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/local/bin/meat3d
+Restart=on-failure
+RestartSec=3
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target

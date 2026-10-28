@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=meat³
+GenericName=Hardware Monitor & Overclocking
+Comment=Sensors, OSD and overclocking for AMD/NVIDIA GPUs and AMD CPUs
+Exec=meat3
+Icon=utilities-system-monitor
+Terminal=false
+Categories=System;Monitor;Utility;
+Keywords=hwinfo;sensors;gpu;cpu;overclock;osd;

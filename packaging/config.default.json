@@ -1,0 +1,11 @@
+{
+  "nvidia_shunt_factor": {},
+  "pin_warn_a": 8.0,
+  "pin_crit_a": 9.0,
+  "osd": {
+    "enabled": false,
+    "hotkey": ["KEY_RIGHTCTRL", "KEY_F12"],
+    "items": []
+  },
+  "poll_interval_s": 1.0
+}
