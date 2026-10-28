@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import sys
 import time
 from typing import Optional
 
-from PySide6.QtCore import QByteArray, QTimer
+from PySide6.QtCore import QByteArray, QProcess, QTimer
 from PySide6.QtGui import QActionGroup, QKeySequence, QPainter
 from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QMainWindow, QMenu,
                                QMessageBox, QPushButton, QStatusBar, QSystemTrayIcon, QTabWidget,
@@ -25,6 +26,16 @@ from meat3.gui.sensors import SensorsPage
 from meat3.gui.update import UpdateDialog
 
 APP_TITLE = "meat³"
+
+
+def installed_version() -> Optional[str]:
+    """The VERSION the installer wrote next to the package this GUI was started from (None in a dev tree)."""
+    import meat3
+    try:
+        with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(meat3.__file__))), "VERSION")) as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
 
 
 class Banner(QFrame):
@@ -55,6 +66,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_TITLE)
         self.setWindowIcon(app_icon())
         self.quitting = False
+        self.started_version = installed_version()
         self.socket_path = socket_path
         self.store = SensorStore(self)
         self.osd_style = OsdStyle()
@@ -103,6 +115,11 @@ class MainWindow(QMainWindow):
         self.upd_btn.hide()
         self.upd_btn.clicked.connect(self.show_updates)
         sb.addPermanentWidget(self.upd_btn)
+        self.restart_btn = QPushButton("⟳ Restart meat³ to finish the update")
+        self.restart_btn.setFlat(True)
+        self.restart_btn.hide()
+        self.restart_btn.clicked.connect(self.restart)
+        sb.addPermanentWidget(self.restart_btn)
         sb.addPermanentWidget(self.log_lbl)
         sb.addPermanentWidget(self.poll_lbl)
         sb.addPermanentWidget(self.conn_lbl)
@@ -226,12 +243,28 @@ class MainWindow(QMainWindow):
 
     def _poll_updates(self):
         def done(u):
+            inst = u.get("installed") if u.get("ok") else None
+            self.restart_btn.setVisible(bool(self.started_version and inst and inst != "unknown"
+                                             and inst != self.started_version and not u.get("running")))
             n = u.get("behind") if u.get("ok") else None
             busy = u.get("ok") and u.get("running")
             self.upd_btn.setText("⬆ updating…" if busy else f"⬆ {n} update{'s' * (n != 1)} available" if n else "")
             self.upd_btn.setVisible(bool(busy or n))
         if self.link.is_connected:
             self.link.request({"cmd": "update_status"}, done)
+
+    def restart(self):
+        """Start a fresh GUI from the installed copy, then quit this (older) one."""
+        launcher = "/usr/local/bin/meat3"
+        if os.path.exists(launcher):
+            ok = QProcess.startDetached(launcher, ["--socket", self.socket_path])
+        else:
+            ok = QProcess.startDetached(sys.executable, ["-m", "meat3.gui", "--socket", self.socket_path])
+        ok = ok[0] if isinstance(ok, tuple) else ok
+        if ok:
+            self.quit()
+        else:
+            self.statusBar().showMessage("Couldn't start a new meat³ window; close and reopen it", 8000)
 
     def _about(self):
         QMessageBox.about(self, "About meat³",

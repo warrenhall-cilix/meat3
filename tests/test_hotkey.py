@@ -33,6 +33,13 @@ class TestHotkey(unittest.TestCase):
             M.write_config(p, M.generate([], hotkey="KEY_RIGHTCTRL+KEY_F12", hotkey_owner="daemon"))
             self.assertFalse(M.set_toggle_key(p, "KEY_LEFTALT+KEY_O"))             # daemon mode: untouched
 
+    def test_generate_style(self):
+        txt = M.generate([], font_size=28, text_color="EEEEEE", background_alpha=0.8, background_color="0B0C0F")
+        for line in ("font_size=28", "text_color=EEEEEE", "background_alpha=0.8", "background_color=0B0C0F"):
+            self.assertIn(line + "\n", txt)
+        self.assertIn("background_alpha=1\n", M.generate([], background_alpha=1.7))
+        self.assertNotIn("background_color", M.generate([]))
+
     def test_global_mangohud(self):
         with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": d}):
             self.assertFalse(M.global_enabled())

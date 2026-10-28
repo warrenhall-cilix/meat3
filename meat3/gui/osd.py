@@ -534,6 +534,20 @@ class OsdPage(QWidget):
         s.save()
         self.overlay.apply_style()
         self.style_changed.emit()
+        self._mh_follow()
+
+    def _mh_follow(self):
+        """Opacity, colours and corner also apply in game: rewrite the MangoHud config (debounced,
+        since a slider drag fires many changes). Only when the config exists or auto-regenerate is on."""
+        path = os.path.expanduser(self.mh_path.text().strip() or str(config_dir() / "MangoHud.conf"))
+        if not (self.mh_auto.isChecked() or os.path.exists(path)):
+            return
+        t = getattr(self, "_mh_timer", None)
+        if t is None:
+            t = self._mh_timer = QTimer(self)
+            t.setSingleShot(True)
+            t.timeout.connect(lambda: self.generate_mangohud(quiet=True))
+        t.start(400)
 
     # MangoHud --------------------------------------------------------
     def _browse_mh(self):
@@ -596,7 +610,11 @@ class OsdPage(QWidget):
         sens = [self.store.sensors.get(i) or {"id": i, "group": "", "label": i} for i in self.items]
         corner = self.style_.corner
         try:
+            hexc = lambda c: str(c).lstrip("#").upper()[:6]          # noqa: E731
             text = mangohud.generate(sens, hotkey=self.link.osd.get("hotkey", ""), osd_file=self.osd_file(),
+                                     text_color=hexc(self.style_.text_color),
+                                     background_color=hexc(self.style_.bg_color),
+                                     background_alpha=self.style_.opacity / 100,
                                      position=corner, font_size=self.mh_size.value(),
                                      include_fps=self.mh_fps.isChecked(),
                                      hotkey_owner=self.mh_owner.currentData(),

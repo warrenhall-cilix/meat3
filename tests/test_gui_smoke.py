@@ -420,8 +420,21 @@ def _exercise(app, w, tmp, sock, osd_file, mock):
     _wait(app, lambda: "Left Alt + O" in w.osd.hotkey_lbl.text(), 5, "hotkey label follows daemon")
 
     # --- updates: status-bar button and dialog (mockd reports 2 new commits)
+    w.started_version = "0ld0ld0"                      # this window predates the installed "mock" version
     w._poll_updates()
     _wait(app, lambda: w.upd_btn.isVisible(), 5, "update button")
+    _wait(app, lambda: w.restart_btn.isVisible(), 5, "restart button for an older window")
+    w.started_version = None
+    w._poll_updates()
+    _wait(app, lambda: not w.restart_btn.isVisible(), 5, "restart button hidden in a dev tree")
+
+    # --- in-game config follows the desktop overlay's opacity and colours
+    w.osd.mh_path.setText(str(tmp / "mh.conf"))
+    w.osd.generate_mangohud(quiet=True)
+    w.osd.opacity.setValue(80)
+    _wait(app, lambda: "background_alpha=0.8" in (tmp / "mh.conf").read_text(), 5, "MangoHud follows opacity")
+    txt = (tmp / "mh.conf").read_text()
+    assert "background_color=" in txt and f"font_size={w.osd.mh_size.value()}" in txt
     assert w.upd_btn.text() == "⬆ 2 updates available", w.upd_btn.text()
     w.show_updates()
     dlg = w._upd_dlg

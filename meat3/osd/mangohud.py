@@ -168,7 +168,8 @@ def _clean(text: str) -> str:
 def generate(sensors: Iterable[dict], hotkey: str = "", osd_file: str = DEFAULT_OSD_FILE,
              position: str = "top-left", font_size: int = 20, include_fps: bool = True,
              hotkey_owner: str = "mangohud", start_hidden: bool = False,
-             text_color: str = "FFFFFF", background_alpha: float = 0.4) -> str:
+             text_color: str = "FFFFFF", background_alpha: float = 0.4,
+             background_color: str = "") -> str:
     """Return a complete MangoHud.conf showing `sensors` (dicts with id/group/label) in order.
 
     hotkey_owner:
@@ -189,7 +190,8 @@ def generate(sensors: Iterable[dict], hotkey: str = "", osd_file: str = DEFAULT_
         f"position={position}",
         f"font_size={int(font_size)}",
         f"text_color={text_color}",
-        f"background_alpha={background_alpha:g}",
+        f"background_alpha={max(0.0, min(1.0, background_alpha)):g}",
+        *([f"background_color={background_color}"] if background_color else []),
         "round_corners=6",
         "text_outline",
         "hud_compact",

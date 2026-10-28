@@ -69,7 +69,17 @@ class UpdateDialog(QDialog):
             if u.get("running"):
                 self.head.setText(f"<b>Updating…</b> (installed {inst}). The window reconnects when meat3d restarts.")
             elif log and log[-1].startswith("== done"):
-                self.head.setText(f"<b>Updated to {inst}.</b> Close and reopen meat³ to load the new GUI too.")
+                self.head.setText(f"<b>Updated to {inst}.</b> Restart meat³ to load the new window too.")
+                win = self.parent()
+                if hasattr(win, "restart"):
+                    self.btn_update.setText("Restart meat³")
+                    try:
+                        self.btn_update.clicked.disconnect()
+                    except (RuntimeError, TypeError):
+                        pass
+                    self.btn_update.clicked.connect(win.restart)
+                    self.btn_update.setEnabled(True)
+                    return
             else:
                 self.head.setText("<b>Update failed.</b> Nothing was changed if it stopped before installing; "
                                   "the log below says why.")
