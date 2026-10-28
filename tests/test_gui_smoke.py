@@ -199,6 +199,7 @@ def _exercise(app, w, tmp, sock, osd_file, mock):
     first = [c.ids[0] for c in gp.cards]
     assert set(first) == set(preset_ids("Overview", w.store.sensors)), first
     n0 = len(gp.cards)
+    assert any(i.endswith(".core0.stall_be") for i in preset_ids("CPU stalls", w.store.sensors))
     gp.add_preset("CPU cores")
     assert len(gp.cards) == n0 + 8, len(gp.cards)
     temps = [c for c in gp.cards if c.unit() == "°C"]
@@ -234,6 +235,8 @@ def _exercise(app, w, tmp, sock, osd_file, mock):
     (pfx, tbl), = cp.tables.items()
     hdrs = [tbl.horizontalHeaderItem(i).text() for i in range(tbl.columnCount())]
     assert tbl.rowCount() == 8 and {"Eff clock", "Volt", "Temp", "Power", "Usage"} <= set(hdrs), hdrs
+    assert {"IPC", "Back-end", "Front-end", "SMT"} <= set(hdrs), hdrs
+    assert tbl.item(0, hdrs.index("Back-end")).text().endswith("%"), tbl.item(0, hdrs.index("Back-end")).text()
     assert tbl.item(0, hdrs.index("Volt")).text().endswith(" V"), tbl.item(0, hdrs.index("Volt")).text()
     assert tbl.item(7, hdrs.index("Temp")).text().endswith("°C")
     vid = cp.layout_ids[pfx][0][2]

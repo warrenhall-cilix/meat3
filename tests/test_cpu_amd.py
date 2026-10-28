@@ -44,7 +44,7 @@ class FakePerf:
         self.counts = {}
         self.closed = []
 
-    def open(self, typ, config, cpu):
+    def open(self, typ, config, cpu, read_format=0):
         if self.fail:
             raise OSError(13, "Permission denied")
         self.opened.append((typ, config, cpu))
@@ -440,6 +440,30 @@ class TestUncore(Base):
         self.assertAlmostEqual(s["cpu0.mem.umc_clk"].value, 3000.0)
         b.close()
         self.assertEqual(len(perf.closed), len(perf.opened))
+
+    def test_pipeline_stalls(self):
+        from meat3.backends import cpu_topdown as td
+        ev = td.events_for(0x1A, 0x44)
+        steps = {(4, ev["cycles"]): 2_000_000_000, (4, ev["instr"]): 3_000_000_000,
+                 (4, ev["ops"]): 4_000_000_000, (4, ev["fe"]): 1_600_000_000,
+                 (4, ev["be"]): 8_000_000_000, (4, ev["smt"]): 800_000_000}
+        perf = FakePerf(steps)
+        b = self.backend(perf=perf)
+        b.sensors()
+        self.clock.t += 1.0
+        s = self.by_id(b.sensors())
+        self.assertAlmostEqual(s["cpu0.core0.ipc"].value, 1.5)
+        self.assertAlmostEqual(s["cpu0.core0.stall_be"].value, 50.0)
+        self.assertAlmostEqual(s["cpu0.core3.stall_fe"].value, 10.0)
+        self.assertAlmostEqual(s["cpu0.pipe.retiring"].value, 25.0)
+        self.assertAlmostEqual(s["cpu0.pipe.bad_spec"].value, 10.0)
+        self.assertIn("8 slots/cycle", s["cpu0.pipe.stall_be"].hint)
+        b.close()
+        self.assertEqual(len(perf.closed), len(perf.opened))
+
+    def test_pipeline_disabled(self):
+        b = self.backend(env={"MEAT3_NO_TOPDOWN": "1"})
+        self.assertFalse(any(x.id.startswith("cpu0.pipe.") for x in b.sensors()))
 
     def test_zen3_l3_events(self):
         self.assertEqual(cpu_amd.l3_events_for(0x19, 0x21)["miss"], {"event": 0x06, "umask": 0x01})

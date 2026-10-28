@@ -114,7 +114,9 @@ HEADLINES = {
             (r"rapl\.intel_rapl_0$", "Package", None), (r"pmt\.vid$", "Core VID", None),
             (r"pmt\.fclk$", "FCLK", None), (r"pmt\.uclk$", "UCLK", None), (r"pmt\.mclk$", "MCLK", None),
             (r"l3\.ccd\d+\.occupancy_pct$", "L3 in use", 100), (r"l3\.ccx\d+\.hit_rate$", "L3 hit rate", 100),
-            (r"l3app\.game\.occupancy$", "Game L3", None), (r"mem\.bw_total$", "DRAM bandwidth", None)],
+            (r"l3app\.game\.occupancy$", "Game L3", None), (r"mem\.bw_total$", "DRAM bandwidth", None),
+            (r"pipe\.ipc$", "IPC", None), (r"pipe\.stall_be$", "Back-end bound", 100),
+            (r"pipe\.stall_fe$", "Front-end bound", 100)],
 }
 
 

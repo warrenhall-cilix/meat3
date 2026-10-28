@@ -39,6 +39,7 @@ from meat3.backends._cpu_common import read_int, read_str
 from meat3.backends import pm_tables
 from meat3.backends import amd_smu
 from meat3.backends import l3apps, l3reserve
+from meat3.backends import cpu_topdown
 from meat3.core import config
 
 # --------------------------------------------------------------------------- MSRs
@@ -133,13 +134,14 @@ class PerfEvents:
         except OSError:
             pass
 
-    def open(self, pmu_type: int, config: int, cpu: int) -> int:
+    def open(self, pmu_type: int, config: int, cpu: int, read_format: int = 0) -> int:
         if self.nr is None or self.libc is None:
             raise OSError(errno.ENOSYS, "perf_event_open unsupported on this arch")
         attr = _PerfAttr()
         attr.type = pmu_type
         attr.size = ctypes.sizeof(_PerfAttr)
         attr.config = config
+        attr.read_format = read_format
         fd = self.libc.syscall(ctypes.c_long(self.nr), ctypes.byref(attr), ctypes.c_int(-1),
                                ctypes.c_int(cpu), ctypes.c_int(-1), ctypes.c_ulong(PERF_FLAG_FD_CLOEXEC))
         if fd < 0:
@@ -153,6 +155,14 @@ class PerfEvents:
         except OSError:
             return None
         return struct.unpack("<Q", b)[0] if len(b) == 8 else None
+
+    def read_scaled(self, fd: int) -> Optional[tuple[int, int, int]]:
+        """(value, time_enabled, time_running) for an fd opened with read_format=3."""
+        try:
+            b = os.read(fd, 24)
+        except OSError:
+            return None
+        return struct.unpack("<QQQ", b) if len(b) == 24 else None
 
     def close(self, fd: int) -> None:
         try:
@@ -417,6 +427,8 @@ class AmdCpuBackend(Backend):
             perf = PerfEvents()
         self.uncore = UncoreCounters(sys_root, perf, self.family, self.model, clock)
         self.resctrl = ResctrlL3(sys_root, self.env, clock)
+        td_on = (config.get().get("cpu_topdown") or {}).get("enabled", True) and self.env.get("MEAT3_NO_TOPDOWN") != "1"
+        self.topdown = cpu_topdown.TopDown(perf, self.topo.cores, self.family, self.model, clock) if td_on else None
         self.msr_prev: dict[tuple[int, int], tuple[float, int]] = {}
         self.energy_unit: Optional[float] = None
         self.energy_rates = cc.RateTracker(wrap=1 << 32)
@@ -582,7 +594,49 @@ class AmdCpuBackend(Backend):
         out += self._core_summary(pm)
         out += self._uncore(pm)
         out += self._l3_occupancy(now)
+        out += self._pipeline()
         out += self._misc()
+        return out
+
+    TD_ROWS = (("ipc", "ipc", "IPC", "", 2,
+                "instructions retired per clock (PMCx0C0 / PMCx076), both threads of the core"),
+               ("retiring", "retiring", "retiring", "%", 1,
+                "dispatch slots doing useful work (ex_ret_ops / slots)"),
+               ("backend", "stall_be", "back-end bound", "%", 1,
+                "slots lost waiting on memory/cache or busy execution units (PMCx1A0 umask 0x1E)"),
+               ("frontend", "stall_fe", "front-end bound", "%", 1,
+                "slots lost waiting for instructions: i-cache/op-cache misses, branch redirects (PMCx1A0 umask 0x01)"),
+               ("smt", "stall_smt", "SMT contention", "%", 1,
+                "slots given to the sibling thread on the same core (PMCx1A0 umask 0x60)"),
+               ("badspec", "bad_spec", "bad speculation", "%", 1,
+                "slots spent on ops that were thrown away (mispredicts); the remainder of the other buckets"))
+
+    def _pipeline(self) -> list[Sensor]:
+        """Per-core IPC and top-down stall breakdown (cpu_topdown.py)."""
+        td = self.topdown
+        if td is None:
+            return []
+        g, p = f"{self.g}/Pipeline stalls", self.prefix
+        s = td.sample()
+        rows = [r for r in self.TD_ROWS if r[0] == "ipc" or td.width]
+        width_txt = f"{td.width} slots/cycle" if td.width else "IPC only before Zen 4"
+        note = "; counters time-shared (another perf user or NMI watchdog), values scaled" if td.multiplexed else ""
+        err = f"; {td.error}" if td.error else ""
+        # whole CPU: sum the raw deltas so busy cores weigh more
+        tot: dict[str, float] = {}
+        for r in s.values():
+            for name, v in (r.get("raw") or {}).items():
+                if v is not None:
+                    tot[name] = tot.get(name, 0.0) + v
+        whole = cpu_topdown.breakdown(tot, td.width)
+        out = []
+        for key, sid, label, unit, dec, hint in rows:
+            out.append(Sensor(f"{p}.pipe.{sid}", g, f"CPU {label}", whole.get(key), unit, dec,
+                              f"all cores, weighted by busy cycles: {hint} [{width_txt}]{note}{err}"))
+        for key, sid, label, unit, dec, hint in rows:
+            for k in range(len(self.topo.cores)):
+                out.append(Sensor(f"{p}.core{k}.{sid}", g, f"Core {k} {label}", s.get(k, {}).get(key), unit, dec,
+                                  f"{hint}; blank while the core is idle [{width_txt}]{note}{err}"))
         return out
 
     def _core_summary(self, pm: list[Sensor]) -> list[Sensor]:
@@ -905,6 +959,8 @@ class AmdCpuBackend(Backend):
     def close(self) -> None:
         self.msr.close()
         self.uncore.close()
+        if self.topdown:
+            self.topdown.close()
         if self.resctrl.apps:
             self.resctrl.apps.close()           # also releases the L3 reservation
         elif self.resctrl.reserve:

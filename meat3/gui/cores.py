@@ -30,6 +30,10 @@ COLUMNS = [
     ("CC6", ["pmt.core{k}.cc6"], False),
     ("Fmax", ["pmt.core{k}.fmax"], False),
     ("CPPC", ["core{k}.cppc_rank"], False),
+    ("IPC", ["core{k}.ipc"], False),
+    ("Back-end", ["core{k}.stall_be"], False),
+    ("Front-end", ["core{k}.stall_fe"], False),
+    ("SMT", ["core{k}.stall_smt"], False),
 ]
 MAX_SUFFIX = " max"
 CORE_RE = re.compile(r"^(?P<p>.+)\.core(?P<k>\d+)\.clk_eff$")

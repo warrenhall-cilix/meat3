@@ -51,6 +51,19 @@ One row per CPU core: effective and active clock, voltage, temperature, power, u
 
 Per-core voltage is the SMU's requested VID for that core, not a socket measurement. It is good for comparing cores and seeing Curve Optimizer changes.
 
+### Pipeline stalls (Zen 4 / Zen 5)
+
+Per core, from the CPU's own performance counters: **IPC** (instructions per clock) and where each dispatch slot went:
+- **Back-end bound:** waiting on memory/cache or busy execution units. This is the one that drops when a game gets more cache (compare it with L3 reservation on and off).
+- **Front-end bound:** waiting for instructions (code cache misses, branch redirects).
+- **SMT contention:** the slot went to the other thread on the same core.
+- **Bad speculation:** work thrown away after a mispredict.
+- **Retiring:** useful work.
+
+The buckets add up to 100%. They show in the Cores tab, under CPU → Pipeline stalls, and in Graphs → Presets → **CPU stalls**, with whole-CPU totals for the OSD. Zen 2/3 get IPC only.
+
+The counters run in counting mode (no sampling or interrupts). Reading all 96 on a 9800X3D takes about 0.1 ms per second, so it costs nothing measurable. If another tool such as `perf` holds counters, the kernel time-shares them and the values are scaled (the hint says so). Disable with `"cpu_topdown": {"enabled": false}`.
+
 ### L3 cache by app and by game
 
 The **Cores** tab lists how much L3 each busy program is actually holding, live, in MB and as a share of the cache, plus "everything else".

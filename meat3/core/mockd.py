@@ -500,6 +500,14 @@ class MockRyzen9800X3D(MockBackend):
                 S(g, f"{P}.core{i}.temp", f"Core {i} temperature", ct, "°C", 1),
                 S(g, f"{P}.pmt.core{i}.volt", f"Core {i} voltage", 1.0 + 0.3 * min(1.0, u / 60) + n(0.005), "V", 4),
             ]
+            be = max(0.0, 18 + 30 * u / 100 - (12 if st.get(f"{P}.l3.reserve") else 0) + n(2))
+            fe, smt = max(0.0, 9 + n(1.5)), max(0.0, 4 * u / 100 + n(0.5))
+            out += [
+                S("Pipeline stalls", f"{P}.core{i}.ipc", f"Core {i} IPC", max(0.1, 3.2 - be / 25 + n(0.1)), "", 2),
+                S("Pipeline stalls", f"{P}.core{i}.stall_be", f"Core {i} back-end bound", be, "%", 1),
+                S("Pipeline stalls", f"{P}.core{i}.stall_fe", f"Core {i} front-end bound", fe, "%", 1),
+                S("Pipeline stalls", f"{P}.core{i}.stall_smt", f"Core {i} SMT contention", smt, "%", 1),
+            ]
         cores_w = sum(powers)
         soc_w = 19 + n(0.3)
         pkg = min(float(st[f"{P}.oc.ppt"]) * (1.4 if st[f"{P}.oc.pbo"] else 1.0), cores_w + soc_w + 6)
