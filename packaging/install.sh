@@ -58,7 +58,8 @@ sudo rm -rf "$PREFIX"
 sudo mkdir -p "$PREFIX"
 sudo cp -r "$SRC/meat3" "$SRC/README.md" "$SRC/PROTOCOL.md" "$PREFIX/"
 sudo find "$PREFIX" -name "__pycache__" -prune -exec rm -rf {} +
-VER="$(git -c safe.directory="$SRC" -C "$SRC" describe --always --dirty 2>/dev/null || echo unknown)"
+# --no-optional-locks: as root (the update button) describe --dirty would rewrite .git/index root-owned
+VER="$(git --no-optional-locks -c safe.directory="$SRC" -C "$SRC" describe --always --dirty 2>/dev/null || echo unknown)"
 echo "$VER" | sudo tee "$PREFIX/VERSION" >/dev/null
 if [[ -d "$SRC/.git" ]]; then                  # lets the GUI/TUI update button find this checkout
     echo "$SRC" | sudo tee "$PREFIX/SOURCE" >/dev/null
