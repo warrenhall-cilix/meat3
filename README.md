@@ -126,17 +126,17 @@ Keys: `Tab` cycles views, `o` toggles the OSD, `r` resets stats, `q` quits. Uses
 
 ## RX 9070 / 9070 XT (RDNA4) extras
 
-Everything below is RDNA4-only. Parsers are checked against a real ASUS RX 9070 XT power table, but
-none of it has run on a real 9070 XT yet; the hidden-metrics module has only been built and loaded on
-a 7.3 kernel with a non-RDNA4 GPU.
+Everything below is RDNA4-only. Monitoring and the hidden-metrics module have run on a real ASUS
+RX 9070 XT (Manjaro, kernel 7.2). VRM telemetry and the VRM, SKU-table and undervolt tools have not:
+on that card the driver exposed no SMU I2C bus, so meat3 found no VRM controllers.
 
 - **Hidden firmware metrics.** `kmod/meat3_smu` (installed via DKMS automatically when an RDNA4 card
   is present, or with `install.sh --kmod`) copies the firmware's full metrics table that amdgpu
   fetches but only partly exposes. New sensors: total board power (what Windows shows), current and
   power per rail (GFX, SoC, VDDCI, VDDIO), VDDCI voltage, GFX and SoC hotspots, GFX target clock,
   fabric clock, PCIe busy, and the share of time each limit (power, current, every temperature,
-  voltage max) held the card back. It never talks to the firmware. Rail current scaling is not yet
-  verified on hardware.
+  voltage max) held the card back. It never talks to the firmware. Checked on a real ASUS RX 9070 XT
+  (VBIOS 115-G295BP00-100): rail currents are in mA, confirmed at idle but not yet under load.
 - **VRM telemetry over PMBus.** The voltage regulators at 0x22/0x24/0x26 on the GPU's own "AMDGPU SMU"
   I2C buses: measured voltage, current, power and temperature per rail, plus input voltage/current.
   **Real power (VRM measured)** is the larger of the 12 V input power into the regulators and the

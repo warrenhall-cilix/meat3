@@ -562,7 +562,7 @@ class TestRdna4Extras(TreeCase):
         thr[14] = 37                                          # PPT0
         tbl = F.build({"AverageTotalBoardPower": 331, "AverageSocketPower": 290,
                        "AverageGfxclkFrequencyTarget": 3010, "AvgVoltage": (1050, 750, 850, 1350),
-                       "AvgCurrent": (240, 30, 5, 12), "AvgTemperature": (60, 78, 80, 70) + (0,) * 8,
+                       "AvgCurrent": (24000, 3000, 500, 1200), "AvgTemperature": (60, 78, 80, 70) + (0,) * 8,
                        "ThrottlingPercentage": thr, "VmaxThrottlingPercentage": 12, "serial": (0xBEEF, 0x12)})
         d = os.path.join(self.root, "sys/kernel/debug/meat3_smu")
         os.makedirs(d)
@@ -571,8 +571,8 @@ class TestRdna4Extras(TreeCase):
         ss = {s.id: s for s in self.be.sensors()}
         self.assertIn("serial 000000120000BEEF", ss["amdgpu0.fm.status"].label)
         self.assertEqual(ss["amdgpu0.fm.pwr.tbp"].value, 331)
-        self.assertEqual(ss["amdgpu0.fm.a.vdd_gfx"].value, 240)
-        self.assertAlmostEqual(ss["amdgpu0.fm.pwr.vdd_gfx"].value, 252.0)
+        self.assertEqual(ss["amdgpu0.fm.a.vdd_gfx"].value, 24)
+        self.assertAlmostEqual(ss["amdgpu0.fm.pwr.vdd_gfx"].value, 25.2)
         self.assertAlmostEqual(ss["amdgpu0.fm.v.vddci_mem"].value, 0.85)
         self.assertEqual(ss["amdgpu0.fm.t.hotspot_gfx"].value, 80)
         self.assertNotIn("amdgpu0.fm.t.liquid_0", ss)                 # zero = sensor not fitted
