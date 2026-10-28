@@ -211,6 +211,7 @@ def _exercise(app, w, tmp, sock, osd_file, mock):
     assert at is not None and at.rowCount() == 3, at and at.rowCount()
     assert at.item(0, 0).text() == "Cyberpunk2077.exe", at.item(0, 0).text()
     assert "Game" in cp.app_title.text() and "Cyberpunk2077.exe" in cp.app_title.text()
+    assert "L3 reserved" in cp.app_title.text() and "everything else 12 MB" in cp.app_title.text(), cp.app_title.text()
     w.grab().save(str(SHOTS / "cores-dark.png"))
 
     # --- overclock tab: apply through the row code path

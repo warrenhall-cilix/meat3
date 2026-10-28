@@ -38,7 +38,7 @@ from meat3.backends import _cpu_common as cc
 from meat3.backends._cpu_common import read_int, read_str
 from meat3.backends import pm_tables
 from meat3.backends import amd_smu
-from meat3.backends import l3apps
+from meat3.backends import l3apps, l3reserve
 from meat3.core import config
 
 # --------------------------------------------------------------------------- MSRs
@@ -316,6 +316,7 @@ class ResctrlL3:
         self.prev: dict[int, tuple[float, int]] = {}
         self.sizes = self._cache_sizes()
         self.apps: Optional[l3apps.L3Apps] = None
+        self.reserve: Optional[l3reserve.L3Reserve] = None
         if env.get("MEAT3_NO_RESCTRL") == "1":
             self.error = "disabled (MEAT3_NO_RESCTRL=1)"
             return
@@ -324,8 +325,13 @@ class ResctrlL3:
         cfg = config.get().get("l3_per_app") or {}
         if (cfg.get("enabled", True) and sys_root == "/sys" and os.geteuid() == 0
                 and os.path.isdir(os.path.join(self.base, "mon_groups"))):
+            rc = config.get().get("l3_reserve") or {}
+            if os.path.isdir(os.path.join(self.base, "info", "L3")):
+                self.reserve = l3reserve.L3Reserve(self.base, enabled=rc.get("enabled", True),
+                                                   background_mb=rc.get("background_mb", 12),
+                                                   domain_sizes=self.sizes)
             self.apps = l3apps.L3Apps(self.base, top=int(cfg.get("top", 8)),
-                                      game_patterns=cfg.get("game_patterns"))
+                                      game_patterns=cfg.get("game_patterns"), reserve=self.reserve)
 
     def _cache_sizes(self) -> dict[int, int]:
         sizes: dict[int, int] = {}
@@ -357,12 +363,17 @@ class ResctrlL3:
 
     def sample(self, now: float) -> dict[int, dict]:
         out: dict[int, dict] = {}
+        # whole-L3 occupancy = root group + every control group (e.g. meat3_game while reserved)
+        extra = l3apps.ctrl_groups(self.base)[1:]
         for d in sorted(glob.glob(os.path.join(self.base, "mon_data/mon_L3_*"))):
             try:
                 cid = int(d.rsplit("_", 1)[1])
             except ValueError:
                 continue
             occ = read_int(os.path.join(d, "llc_occupancy"))
+            for g in extra:
+                v = read_int(os.path.join(g, "mon_data", os.path.basename(d), "llc_occupancy"))
+                occ = None if occ is None or v is None else occ + v
             rec = {"occ": occ, "size": self.sizes.get(cid), "has_mbm": os.path.exists(os.path.join(d, "mbm_total_bytes"))}
             if rec["has_mbm"]:
                 tot = read_int(os.path.join(d, "mbm_total_bytes"))
@@ -776,6 +787,26 @@ class AmdCpuBackend(Backend):
                           "game's L3 occupancy as % of total L3 size"))
         if a.error:
             out[-1].hint += f"; note: {a.error}"
+        out += self._l3_reserve_sensors(g)
+        return out
+
+    def _l3_reserve_sensors(self, g: str) -> list[Sensor]:
+        r, p = self.resctrl.reserve, self.prefix
+        if r is None:
+            return []
+        bg, game = r.masks()
+        wb = r.way_bytes
+        hint = ("MB here = MiB, as in AMD's \"96MB L3\". resctrl cache allocation: game threads in control group meat3_game may fill only the "
+                f"game ways, everything else only the background ways (masks {bg:x} / {game:x} of {r.full:x}); "
+                "set under Overclock → L3 cache")
+        out = [Sensor(f"{p}.l3.reserve.active", g, f"L3 reservation: {r.status()}",
+                      1.0 if r.active else 0.0, "", 0, hint)]
+        if wb:
+            on = r.active
+            out.append(Sensor(f"{p}.l3.reserve.game_mb", g, "L3 reserved for game",
+                              bin(game).count("1") * wb / 1048576 if on else None, "MB", 0, hint))
+            out.append(Sensor(f"{p}.l3.reserve.bg_mb", g, "L3 limit for everything else",
+                              bin(bg).count("1") * wb / 1048576 if on else None, "MB", 0, hint))
         return out
 
     def _misc(self) -> list[Sensor]:
@@ -803,12 +834,69 @@ class AmdCpuBackend(Backend):
 
     # ------------------------------------------------------------------ controls
     def controls(self) -> list[Control]:
-        return self.cpufreq.controls() + amd_smu.smu_controls(self.smu, self.pmt, self.prefix, self.g,
-                                                              ncores=len(self.topo.cores))
+        return (self.cpufreq.controls() + self._l3_controls()
+                + amd_smu.smu_controls(self.smu, self.pmt, self.prefix, self.g, ncores=len(self.topo.cores)))
+
+    def _l3_controls(self) -> list[Control]:
+        r, p, g = self.resctrl.reserve, self.prefix, f"{self.g}/L3 cache"
+        if r is None:
+            return []
+        why = None
+        if not r.available:
+            why = r.error
+        elif self.resctrl.apps is None:
+            why = "needs l3_per_app.enabled in /etc/meat3/config.json (game detection)"
+        wm = r.way_mb
+        base = ("While a game runs (Steam title or l3_per_app.game_patterns), background apps may only fill "
+                "a small slice of L3 and the game gets the rest to itself, so browsers, Discord, shader "
+                "compiles etc. cannot evict the game's data. Lookups are unaffected; nothing is written to "
+                "hardware settings that survive a reboot. Saved to /etc/meat3/config.json.")
+        out = [Control(f"{p}.l3.reserve", g, "Reserve L3 for games", "bool", r.enabled, default=False,
+                       available=why is None, hint=(why + ". " if why else "") + base)]
+        if wm:
+            out.append(Control(f"{p}.l3.reserve_bg_mb", g, "L3 limit for background apps while gaming", "int",
+                               round(r.bg_ways * wm), min=round(wm), max=round(r.max_bg_ways * wm), step=round(wm),
+                               unit="MB", default=round(2 * wm), available=why is None,
+                               hint=(why + ". " if why else "") +
+                               f"Rounded to whole L3 ways ({wm:.0f} MB each of {r.ways}); the game gets the "
+                               "rest. Smaller = more for the game, but background apps run from DRAM more."))
+        return out
+
+    def _l3_apply(self, control_id: str, value: Any) -> tuple[bool, str]:
+        r = self.resctrl.reserve
+        if r is None or not r.available or self.resctrl.apps is None:
+            return False, "L3 reservation unavailable"
+        cfg = config.get()
+        rc = dict(cfg.get("l3_reserve") or {})
+        if control_id.endswith(".l3.reserve"):
+            if not isinstance(value, bool):
+                return False, "expected true/false"
+            r.set_enabled(value)
+            rc["enabled"] = value
+            msg = "L3 reservation " + ("on: applies while a game runs" if value else "off")
+        else:
+            try:
+                mb = float(value)
+            except (TypeError, ValueError):
+                return False, "expected a number of MB"
+            lo, hi = r.way_mb, r.max_bg_ways * r.way_mb
+            if not lo - 1e-6 <= mb <= hi + 1e-6:
+                return False, f"out of range {lo:.0f}..{hi:.0f} MB"
+            r.set_background_mb(mb)
+            rc["background_mb"] = round(r.bg_ways * r.way_mb)
+            msg = f"background apps limited to {rc['background_mb']} MB of L3 while gaming"
+        cfg["l3_reserve"] = rc
+        try:
+            config.save(cfg)
+        except OSError as e:
+            msg += f" (not saved: {e.strerror})"
+        return True, msg
 
     def apply(self, control_id: str, value: Any) -> tuple[bool, str]:
         if self.cpufreq.handles(control_id):
             return self.cpufreq.apply(control_id, value)
+        if control_id in (f"{self.prefix}.l3.reserve", f"{self.prefix}.l3.reserve_bg_mb"):
+            return self._l3_apply(control_id, value)
         if control_id.startswith(f"{self.prefix}.smu."):
             return amd_smu.smu_apply(self.smu, self.pmt, self.prefix, control_id, value,
                                      ncores=len(self.topo.cores))
@@ -818,7 +906,9 @@ class AmdCpuBackend(Backend):
         self.msr.close()
         self.uncore.close()
         if self.resctrl.apps:
-            self.resctrl.apps.close()
+            self.resctrl.apps.close()           # also releases the L3 reservation
+        elif self.resctrl.reserve:
+            self.resctrl.reserve.close()
 
 
 BACKENDS = [AmdCpuBackend]

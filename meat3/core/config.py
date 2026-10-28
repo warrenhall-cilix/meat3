@@ -30,6 +30,10 @@ DEFAULTS = {
     # top: how many of the busiest apps get their own group; game_patterns: process names that
     # count as games besides Steam titles (detected via SteamAppId).
     "l3_per_app": {"enabled": True, "top": 8, "game_patterns": ["*.exe"]},
+    # L3 reservation (resctrl cache allocation, cat_l3): while a game runs, background apps may only
+    # fill `background_mb` of L3 and the game gets the rest exclusively. Needs l3_per_app (game
+    # detection). Rounded to whole L3 ways (6 MB each on a 9800X3D), at most half the cache.
+    "l3_reserve": {"enabled": True, "background_mb": 12},
     # AMD Ryzen SMU overclocking (Curve Optimizer, PBO PPT/TDC/EDC) via ryzen_smu.
     # Validated on Granite Ridge (9800X3D): CO all/per-core write+readback+stress, PPT write+readback.
     "amd_smu_controls": True,

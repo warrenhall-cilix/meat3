@@ -460,6 +460,11 @@ class MockRyzen9800X3D(MockBackend):
                     hint="VSOC is BIOS-only on this board (SMU mailbox command locked)."),
             Control(f"{P}.oc.reset_co", G, "Reset Curve Optimizer", "action",
                     hint="Sets all per-core CO counts to 0."),
+            Control(f"{P}.l3.reserve", f"{G}/L3 cache", "Reserve L3 for games", "bool", default=True,
+                    hint="While a game runs, background apps may only fill a small slice of L3."),
+            Control(f"{P}.l3.reserve_bg_mb", f"{G}/L3 cache", "L3 limit for background apps while gaming",
+                    "int", min=6, max=48, step=6, unit="MB", default=12,
+                    hint="Rounded to whole L3 ways (6 MB each of 16); the game gets the rest."),
         ]
 
     def action(self, control_id: str) -> tuple[bool, str]:
@@ -507,19 +512,26 @@ class MockRyzen9800X3D(MockBackend):
             S("Cores", f"{P}.cores_power", "Cores power", cores_w, "W", 1),
         ]
         out = summary + out
-        g_occ = 58 + 6 * load + n(1.5)
-        ff = 9 + n(0.8)
+        res = bool(st.get(f"{P}.l3.reserve"))
+        bg_mb = float(st.get(f"{P}.l3.reserve_bg_mb") or 12)
+        g_occ = (70 if res else 58) + 6 * load + n(1.5)
+        ff = (bg_mb * 0.45 if res else 9) + n(0.4)
+        other = bg_mb * 0.5 if res else 12
         out += [
-            S("L3 cache", f"{P}.l3.ccd0.occupancy", "L3 in use", g_occ + ff + 12, "MB", 1),
+            S("L3 cache", f"{P}.l3.ccd0.occupancy", "L3 in use", g_occ + ff + other, "MB", 1),
             S("L3 cache", f"{P}.l3.ccd0.occupancy_pct", "L3 in use (% of 96 MiB)",
-              100 * (g_occ + ff + 12) / 100.663296, "%", 1),
+              100 * (g_occ + ff + other) / 100.663296, "%", 1),
             S("L3 by app", f"{P}.l3app.steam_1091500.occupancy", "Cyberpunk2077.exe L3 in use", g_occ, "MB", 1),
             S("L3 by app", f"{P}.l3app.steam_1091500.cpu", "Cyberpunk2077.exe CPU usage", 48 * load + 5, "%", 1),
             S("L3 by app", f"{P}.l3app.firefox.occupancy", "firefox L3 in use", ff, "MB", 1),
             S("L3 by app", f"{P}.l3app.firefox.cpu", "firefox CPU usage", 2.5, "%", 1),
-            S("L3 by app", f"{P}.l3app.other.occupancy", "Everything else L3 in use", 12, "MB", 1),
+            S("L3 by app", f"{P}.l3app.other.occupancy", "Everything else L3 in use", other, "MB", 1),
             S("L3 by app", f"{P}.l3app.game.occupancy", "Game L3 in use", g_occ, "MB", 1,
               "game: Cyberpunk2077.exe (Steam app 1091500)"),
+            S("L3 by app", f"{P}.l3.reserve.active",
+              "L3 reservation: " + ("active for Cyberpunk2077.exe" if res else "off"), 1.0 if res else 0.0, "", 0),
+            S("L3 by app", f"{P}.l3.reserve.game_mb", "L3 reserved for game", 96 - bg_mb if res else None, "MB", 0),
+            S("L3 by app", f"{P}.l3.reserve.bg_mb", "L3 limit for everything else", bg_mb if res else None, "MB", 0),
         ]
         out += [
             S("Temperatures", f"{P}.temp.tctl", "Tctl/Tdie", tctl, "°C", 1),

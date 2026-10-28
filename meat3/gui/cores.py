@@ -35,6 +35,20 @@ MAX_SUFFIX = " max"
 CORE_RE = re.compile(r"^(?P<p>.+)\.core(?P<k>\d+)\.clk_eff$")
 
 
+
+def reserve_text(sens: dict, pfx: str) -> str:
+    """Second title line: state of the L3 game reservation (cpu0.l3.reserve.*), or "" without CAT."""
+    r = sens.get(f"{pfx}.l3.reserve.active")
+    if r is None:
+        return ""
+    state = r.get("label", "").removeprefix("L3 reservation: ")
+    if r.get("value"):
+        g = sens.get(f"{pfx}.l3.reserve.game_mb", {}).get("value")
+        b = sens.get(f"{pfx}.l3.reserve.bg_mb", {}).get("value")
+        split = f": game {g:.0f} MB, everything else {b:.0f} MB" if g is not None and b is not None else ""
+        return f"<br><b>L3 reserved</b> {state.removeprefix('active ')}{split}"
+    return f"<br>L3 reservation: {state} <i>(Overclock → L3 cache)</i>"
+
 class CoresPage(QWidget):
     osd_toggle_requested = Signal(str, bool)
     status = Signal(str)
@@ -220,7 +234,9 @@ class CoresPage(QWidget):
         if game is not None and game.get("value") is not None:
             gname = (game.get("hint") or "").removeprefix("game: ").split(" (")[0]
             gtxt = f"  ·  <b>Game</b> {gname}: {game['value']:.1f} MB"
-        self.app_title.setText(f"<b>L3 by app</b> — live cache occupancy per program{gtxt}")
+        self.app_title.setText(f"<b>L3 by app</b> — live cache occupancy per program{gtxt}"
+                               + reserve_text(sens, pfx))
+        self.app_title.setToolTip(sens.get(f"{pfx}.l3.reserve.active", {}).get("hint", ""))
         t = self.app_table
         t.setRowCount(len(rows))
         for i, (mb, name, cpu, hint, sid) in enumerate(rows):

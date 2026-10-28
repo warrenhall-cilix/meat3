@@ -469,6 +469,18 @@ class Tui:
                 if gname:
                     self.put(y, 12, f"· game: {gname} {game['value']:.1f} MB", self.cp["dim"])
                 y += 1
+                rs = self.sensors.get(f"{p}.l3.reserve.active")
+                if rs is not None and y < top + height - 2:
+                    st = rs.get("label", "").removeprefix("L3 reservation: ")
+                    if rs.get("value"):
+                        g = self.sensors.get(f"{p}.l3.reserve.game_mb", {}).get("value")
+                        b = self.sensors.get(f"{p}.l3.reserve.bg_mb", {}).get("value")
+                        txt = f"L3 reserved {st.removeprefix('active ')}" + (
+                            f": game {g:.0f} MB, everything else {b:.0f} MB" if g is not None and b is not None else "")
+                        self.put(y, 3, txt[:w - 4], self.cp["ok"] | curses.A_BOLD)
+                    else:
+                        self.put(y, 3, f"L3 reservation: {st}"[:w - 4], self.cp["dim"])
+                    y += 1
                 size = None
                 for sid, s in self.sensors.items():
                     m = re.search(r"% of (\d+) MiB", s.get("label", "")) if sid.startswith(f"{p}.l3.ccd") else None
