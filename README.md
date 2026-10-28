@@ -102,7 +102,40 @@ meat3-tui            # same daemon, in a terminal (works over SSH)
 Views: **1 Overview** (dashboard panels with bars, per-pin current and per-core clocks), **2 Sensors** (everything, with min/max/avg; `/` to filter), **3 Cores** (per-core table and L3 by app), **4 Overclock** (select a control and press Enter to set it; dangerous settings require typing `yes`).
 Keys: `Tab` cycles views, `o` toggles the OSD, `r` resets stats, `q` quits. Uses only Python's built-in curses.
 
-## OSD
+## RX 9070 / 9070 XT (RDNA4) extras
+
+Everything below is RDNA4-only. Parsers are checked against a real ASUS RX 9070 XT power table, but
+none of it has run on a real 9070 XT yet; the hidden-metrics module has only been built and loaded on
+a 7.3 kernel with a non-RDNA4 GPU.
+
+- **Hidden firmware metrics.** `kmod/meat3_smu` (installed via DKMS automatically when an RDNA4 card
+  is present, or with `install.sh --kmod`) copies the firmware's full metrics table that amdgpu
+  fetches but only partly exposes. New sensors: total board power (what Windows shows), current and
+  power per rail (GFX, SoC, VDDCI, VDDIO), VDDCI voltage, GFX and SoC hotspots, GFX target clock,
+  fabric clock, PCIe busy, and the share of time each limit (power, current, every temperature,
+  voltage max) held the card back. It never talks to the firmware. Rail current scaling is not yet
+  verified on hardware.
+- **VRM telemetry over PMBus.** The voltage regulators at 0x22/0x24/0x26 on the GPU's own "AMDGPU SMU"
+  I2C buses: measured voltage, current, power and temperature per rail, plus input voltage/current.
+- **VRM voltage offsets** (Overclock → VRM voltage offsets). Writes PMBus `VOUT_CAL_OFFSET`, which
+  can add voltage the driver doesn't allow. Off unless `"amdgpu_vrm": {"allow_writes": true}` is set
+  in `/etc/meat3/config.json`, clamped to ±`max_offset_mv` (50), only for regulators in linear
+  VOUT mode, read back after every write. A power cycle restores the factory value; "restore factory
+  offset" writes back the value meat3 saw first. RDNA4 partly compensates for these offsets.
+- **`meat3-gputune`**: automatic undervolt finder. It steps the GFX voltage offset down 10 mV at a
+  time while you run a demanding game or benchmark (or `--load CMD`). A step only counts while the
+  GPU is ≥85% busy, and fails on any amdgpu timeout, reset or page fault in the kernel log. It's
+  crash-safe like `meat3-cotune`, with `--apply`, `--save-boot` and `--status`.
+- **`meat3-skutable`** + `tools/build_patched_amdgpu.sh`: the board "custom SKU table" (Windows:
+  MoreClockTool's SoftTuningTable). This covers power, current (TDC), temperature and fan limits, and
+  the board-power formula. The stock Linux driver can't send it, so the script builds amdgpu from
+  kernel.org source with a small patch, for the running kernel only. The patched driver uploads
+  `/lib/firmware/amdgpu/custom_sku_<pci>.bin` during init, and also on
+  `sudo meat3-skutable --send`. The firmware checks it against the signed board limits and the
+  kernel log shows which parts it rejected. It can't give more watts than the BIOS allows. The
+  realistic gains are higher current limits and fan control. Raising temperature limits or
+  changing the board-power formula needs `--force`.
+
 
 - Pick sensors in the **OSD** tab and toggle with **Right Ctrl + F12**. The hotkey works system-wide, including in fullscreen games, because the daemon reads the keyboard.
 - **Desktop:** the GUI shows a click-through overlay.

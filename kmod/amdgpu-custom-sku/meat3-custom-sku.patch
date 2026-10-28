@@ -1,0 +1,151 @@
+diff -ruN a/drivers/gpu/drm/amd/pm/swsmu/amdgpu_smu.c b/drivers/gpu/drm/amd/pm/swsmu/amdgpu_smu.c
+--- a/drivers/gpu/drm/amd/pm/swsmu/amdgpu_smu.c
++++ b/drivers/gpu/drm/amd/pm/swsmu/amdgpu_smu.c
+@@ -1798,6 +1798,10 @@
+ 		}
+ 	}
+ 
++	/* optional board CustomSkuTable override, before features are enabled */
++	if (smu->ppt_funcs && smu->ppt_funcs->upload_custom_sku)
++		smu->ppt_funcs->upload_custom_sku(smu, false);
++
+ 	/* issue Run*Btc msg */
+ 	ret = smu_run_btc(smu);
+ 	if (ret)
+@@ -4168,12 +4172,40 @@
+ 
+ #endif
+ 
++#if defined(CONFIG_DEBUG_FS)
++static ssize_t smu_custom_sku_write(struct file *f, const char __user *buf,
++				    size_t size, loff_t *pos)
++{
++	struct amdgpu_device *adev = file_inode(f)->i_private;
++	struct smu_context *smu = adev->powerplay.pp_handle;
++	int ret;
++
++	/* any write re-reads amdgpu/custom_sku_<pci>.bin and sends it again */
++	mutex_lock(&adev->pm.mutex);
++	ret = smu->ppt_funcs->upload_custom_sku(smu, true);
++	mutex_unlock(&adev->pm.mutex);
++	return ret ? ret : size;
++}
++
++static const struct file_operations smu_custom_sku_fops = {
++	.owner = THIS_MODULE,
++	.open = simple_open,
++	.write = smu_custom_sku_write,
++	.llseek = default_llseek,
++};
++#endif
++
+ void amdgpu_smu_stb_debug_fs_init(struct amdgpu_device *adev)
+ {
+ #if defined(CONFIG_DEBUG_FS)
+ 
+ 	struct smu_context *smu = adev->powerplay.pp_handle;
+ 
++	if (smu && smu->ppt_funcs && smu->ppt_funcs->upload_custom_sku)
++		debugfs_create_file("amdgpu_custom_sku", 0200,
++				    adev_to_drm(adev)->primary->debugfs_root,
++				    adev, &smu_custom_sku_fops);
++
+ 	if (!smu || (!smu->stb_context.stb_buf_size))
+ 		return;
+ 
+diff -ruN a/drivers/gpu/drm/amd/pm/swsmu/inc/amdgpu_smu.h b/drivers/gpu/drm/amd/pm/swsmu/inc/amdgpu_smu.h
+--- a/drivers/gpu/drm/amd/pm/swsmu/inc/amdgpu_smu.h
++++ b/drivers/gpu/drm/amd/pm/swsmu/inc/amdgpu_smu.h
+@@ -396,6 +396,7 @@
+ 	SMU_TABLE_COMBO_PPTABLE,
+ 	SMU_TABLE_WIFIBAND,
+ 	SMU_TABLE_PMFW_SYSTEM_METRICS,
++	SMU_TABLE_CUSTOM_SKUTABLE,
+ 	SMU_TABLE_COUNT,
+ };
+ 
+@@ -1195,6 +1196,13 @@
+ 	int (*set_driver_table_location)(struct smu_context *smu);
+ 
+ 	/**
++	 * @upload_custom_sku: Send a board CustomSkuTable override to the PMFW
++	 * (from firmware file amdgpu/custom_sku_<pci>.bin). Returns 0 when there is
++	 * nothing to send; never fatal for init.
++	 */
++	int (*upload_custom_sku)(struct smu_context *smu, bool verbose);
++
++	/**
+ 	 * @set_tool_table_location: Send the location of the tool table to the
+ 	 *                           SMU.
+ 	 */
+diff -ruN a/drivers/gpu/drm/amd/pm/swsmu/smu14/smu_v14_0_2_ppt.c b/drivers/gpu/drm/amd/pm/swsmu/smu14/smu_v14_0_2_ppt.c
+--- a/drivers/gpu/drm/amd/pm/swsmu/smu14/smu_v14_0_2_ppt.c
++++ b/drivers/gpu/drm/amd/pm/swsmu/smu14/smu_v14_0_2_ppt.c
+@@ -236,6 +236,7 @@
+ 	TAB_MAP(I2C_COMMANDS),
+ 	TAB_MAP(ECCINFO),
+ 	TAB_MAP(OVERDRIVE),
++	TAB_MAP(CUSTOM_SKUTABLE),
+ };
+ 
+ static struct cmn2asic_mapping smu_v14_0_2_pwr_src_map[SMU_POWER_SOURCE_COUNT] = {
+@@ -402,6 +403,8 @@
+ 			PAGE_SIZE, AMDGPU_GEM_DOMAIN_VRAM);
+ 	SMU_TABLE_INIT(tables, SMU_TABLE_ECCINFO, sizeof(EccInfoTable_t),
+ 			PAGE_SIZE, AMDGPU_GEM_DOMAIN_VRAM);
++	SMU_TABLE_INIT(tables, SMU_TABLE_CUSTOM_SKUTABLE, sizeof(CustomSkuTable_t),
++			PAGE_SIZE, AMDGPU_GEM_DOMAIN_VRAM);
+ 
+ 	smu_table->metrics_table = kzalloc_obj(SmuMetricsExternal_t);
+ 	if (!smu_table->metrics_table)
+@@ -2912,7 +2915,50 @@
+ 	return 0;
+ }
+ 
++/*
++ * Board CustomSkuTable override (the table Windows tools send as a "SoftTuningTable"): power,
++ * TDC, temperature and fan limits. The PMFW validates it against the signed board limits and
++ * reports rejected sections in the response argument (TABLE_PPT_FAILED, TABLE_TDC_FAILED, ...).
++ * Read from firmware file amdgpu/custom_sku_<pci address>.bin, exactly sizeof(CustomSkuTable_t).
++ */
++static int smu_v14_0_2_upload_custom_sku(struct smu_context *smu, bool verbose)
++{
++	struct amdgpu_device *adev = smu->adev;
++	const struct firmware *fw;
++	uint32_t resp = 0;
++	char name[64];
++	int ret;
++
++	snprintf(name, sizeof(name), "amdgpu/custom_sku_%s.bin", pci_name(adev->pdev));
++	ret = firmware_request_nowarn(&fw, name, adev->dev);
++	if (ret) {
++		if (verbose)
++			dev_info(adev->dev, "custom SKU table: %s not found\n", name);
++		return verbose ? -ENOENT : 0;
++	}
++	if (fw->size != sizeof(CustomSkuTable_t)) {
++		dev_warn(adev->dev, "custom SKU table: %s is %zu bytes, expected %zu; ignored\n",
++			 name, fw->size, sizeof(CustomSkuTable_t));
++		release_firmware(fw);
++		return verbose ? -EINVAL : 0;
++	}
++	ret = smu_cmn_update_table_read_arg(smu, SMU_TABLE_CUSTOM_SKUTABLE, 0,
++					    (void *)fw->data, &resp, true);
++	release_firmware(fw);
++	if (ret)
++		dev_warn(adev->dev, "custom SKU table: PMFW rejected the transfer (%d, response 0x%x)\n",
++			 ret, resp);
++	else
++		dev_info(adev->dev, "custom SKU table: %s uploaded, PMFW response 0x%x%s%s%s%s\n", name, resp,
++			 resp & TABLE_PPT_FAILED ? " PPT-rejected" : "",
++			 resp & TABLE_TDC_FAILED ? " TDC-rejected" : "",
++			 resp & TABLE_TEMP_FAILED ? " TEMP-rejected" : "",
++			 resp & 0x3F800 ? " FAN-rejected" : "");
++	return verbose ? ret : 0;
++}
++
+ static const struct pptable_funcs smu_v14_0_2_ppt_funcs = {
++	.upload_custom_sku = smu_v14_0_2_upload_custom_sku,
+ 	.init_allowed_features = smu_v14_0_2_init_allowed_features,
+ 	.set_default_dpm_table = smu_v14_0_2_set_default_dpm_table,
+ 	.i2c_init = smu_v14_0_2_i2c_control_init,
