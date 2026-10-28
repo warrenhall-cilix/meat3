@@ -32,8 +32,8 @@ Optional extras:
 |---|---|
 | **NVIDIA** | GPC/SM/memory/video clocks, plus XBAR/SYS/HUB/NVD clocks; NVVDD/MSVDD voltage and REL/ALT/OV limits; board power raw and **shunt-mod corrected**; **GDDR7 memory temperature**; limiter flags; offsets; VRAM; PCIe; fans |
 | **ASUS ROG Astral** | **12V-2x6 per-pin voltage/current** (ITE IT8915FN), connector total, imbalance %, aux 12 V inputs |
-| **AMD GPU** (amdgpu) | Every `gpu_metrics` version (generated from kernel headers; RX 9070 XT = v1_3): edge/hotspot/memory/VR temperatures, GFX/SoC/memory voltages, all clocks, socket power, throttle reasons, fan, PCIe; plus hwmon and sysfs |
-| **AMD CPU** (Zen 2–5) | Per-core effective clock (APERF/MPERF), load, C-states, power, voltage, temperature; package power (RAPL/MSR); **FCLK/UCLK/MCLK**; **L3 hit rate per CCX**; **DRAM read/write bandwidth**; PPT/TDC/EDC; SVI3 rails |
+| **AMD GPU** (amdgpu) | Every `gpu_metrics` version (generated from kernel headers; RX 9070 XT = v1_3): edge/hotspot/memory/VR temperatures, GFX/SoC/memory voltages, all clocks, socket power, throttle reasons, fan, PCIe; plus hwmon and sysfs. **RX 9070 / 9070 XT:** board limits from the firmware power table (rated base/game/boost clocks, power and current limits, per-sensor throttle and shutdown temperatures, GFX voltage ceiling, overdrive headroom) and throttle reasons with RDNA4 names, including the GFX/SoC hotspots the driver's summary drops |
+| **AMD CPU** (Zen 2–5) | Per-core effective clock (APERF/MPERF), load, C-states, power, voltage, temperature; package power (RAPL/MSR); **FCLK/UCLK/MCLK**; **L3 in use per CCD (MB and %, via resctrl)**; **L3 hit rate per CCX**; **DRAM read/write bandwidth**; PPT/TDC/EDC; SVI3 rails |
 | **Board** | Super I/O fans/voltages/temperatures, NVMe, DDR5 SPD temperatures, chipset/NIC/Wi-Fi temperatures |
 
 ### Cores tab
@@ -47,6 +47,8 @@ Per-core voltage is the SMU's requested VID for that core, not a socket measurem
 - **NVIDIA:** power limit, core/memory offsets, max-clock lock, XBAR/SYS offsets, MSVDD/NVVDD Vrel offsets.
 - **AMD GPU:** power cap, performance level, power profile.
   - Overdrive (RDNA4/RDNA3: clock offset, memory clock, voltage offset, fan curve/zero-RPM) needs the kernel parameter **`amdgpu.ppfeaturemask=0xfff7ffff`** and a reboot. Without it the controls show as greyed out.
+  - On RDNA4 the memory-clock min/max controls use the board's real per-field ranges from `pp_table`. The `OD_RANGE` the driver prints is the union of the two, so some values inside it would be rejected.
+  - Power limits above the firmware limit are applied as whole-% overdrive steps. meat³ reports the value the driver actually set. If the driver rejects an overdrive setting, meat³ shows the kernel's reason (for example `OD_FAN_CURVE_PWM_ERROR`).
 - **AMD CPU (Ryzen only):** governor, EPP, boost, min/max frequency, amd-pstate mode, plus **Curve Optimizer (all-core and per-core) and PBO PPT/TDC/EDC limits** through the SMU (needs `ryzen_smu`).
   - Validated on a 9800X3D (Granite Ridge): CO −5 write and per-core readback, 45 s verified stress with no errors, restore; PPT 162→170→162 W read back from the SMU power table.
   - SMU settings are not persistent and reset at reboot.
