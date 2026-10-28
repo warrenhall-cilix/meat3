@@ -35,6 +35,7 @@ if __package__ in (None, ""):  # allow `python3 meat3/backends/amdgpu.py`
 from ..core.model import Backend, Control, Sensor
 from . import amdgpu_metrics as gm
 from . import amdgpu_od as odm
+from . import amdgpu_pptable as ppt
 
 SYSFS_ROOT_ENV = "MEAT3_SYSFS_ROOT"
 DRY_RUN_ENV = "MEAT3_DRY_RUN"
@@ -80,7 +81,7 @@ GC_ARCH = [((12,), "RDNA4"), ((11, 5), "RDNA3.5"), ((11,), "RDNA3"), ((10, 3), "
 CAT_GROUP = {"temp": "Temperatures", "clock": "Clocks", "volt": "Voltages", "current": "Currents",
              "power": "Power", "activity": "Activity", "fan": "Fan", "pcie": "PCIe",
              "throttle": "Throttling", "memory": "Memory", "raw": "SMU metrics (raw)",
-             "dpm": "DPM levels"}
+             "dpm": "DPM levels", "limits": "Board limits (firmware)"}
 
 
 # --------------------------------------------------------------------------------------
@@ -142,6 +143,43 @@ class SysfsIO:
 
 # --------------------------------------------------------------------------------------
 # small text parsers
+
+class _KmsgTail:
+    """Opened before an OD write; on failure returns the amdgpu kernel messages logged since
+    (e.g. 'Invalid overdrive table content: OD_FAN_CURVE_PWM_ERROR'). Silent if /dev/kmsg is
+    unavailable (non-root, tests)."""
+
+    def __init__(self):
+        self.fd = None
+        try:
+            self.fd = os.open("/dev/kmsg", os.O_RDONLY | os.O_NONBLOCK)
+            os.lseek(self.fd, 0, os.SEEK_END)
+        except OSError:
+            self.fd = None
+
+    def amdgpu_lines(self) -> str:
+        if self.fd is None:
+            return ""
+        msgs = []
+        while True:
+            try:
+                rec = os.read(self.fd, 8192).decode(errors="replace")
+            except BlockingIOError:
+                break
+            except OSError:
+                continue          # EPIPE: overwritten records; keep reading
+            if not rec:
+                break
+            text = rec.split(";", 1)[-1].strip()
+            if "amdgpu" in text or "smu" in text.lower():
+                msgs.append(re.sub(r"^amdgpu \S+: (\[drm\] )?", "", text))
+        return " | ".join(msgs[-3:])
+
+    def close(self) -> None:
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
 
 def _int(s: Optional[str], base: int = 0) -> Optional[int]:
     if s is None:
@@ -258,6 +296,12 @@ class AmdGpuBackend(Backend):
         self._seen_metric_keys: list[str] = []
         self._seen_rows: dict[str, dict] = {}
         self._hwmon_rows = self._scan_hwmon()
+        self.pptable = None
+        if self.mp1 and self.mp1[:2] == (14, 0) and not self.is_apu:
+            try:
+                self.pptable = ppt.parse(self.io.read_bytes(os.path.join(self.dev, "pp_table")))
+            except Exception:
+                self.pptable = None
 
     # ---- discovery -------------------------------------------------------------------
 
@@ -362,6 +406,15 @@ class AmdGpuBackend(Backend):
             lab = label(f"temp{n}") or f"temp{n}"
             rows.append((f"hwmon.temp{n}", "temp", tnames.get(lab, lab), f, 0.001, "°C", 0,
                          f"hwmon temp{n}_input ({lab})"))
+        for n, f in files("temp*_crit"):
+            if not re.search(r"temp\d+_crit$", f):
+                continue
+            lab = label(f"temp{n}") or f"temp{n}"
+            for suffix, what in (("crit", "critical limit"), ("emergency", "emergency limit")):
+                fp = os.path.join(h, f"temp{n}_{suffix}")
+                if os.path.exists(fp):
+                    rows.append((f"hwmon.temp{n}_{suffix}", "limits", f"{tnames.get(lab, lab)} {what}", fp,
+                                 0.001, "°C", 0, f"hwmon temp{n}_{suffix}"))
         for n, f in files("fan*_input"):
             rows.append((f"hwmon.fan{n}", "fan", f"Fan {n} speed", f, 1.0, "RPM", 0,
                          f"hwmon fan{n}_input"))
@@ -479,6 +532,64 @@ class AmdGpuBackend(Backend):
             r = current.get(key) or dict(self._seen_rows[key], value=None)
             out.append(Sensor(f"{P}.gm.{key}", self._grp(r["cat"]), r["label"], r["value"],
                               r["unit"], r["decimals"], r["hint"]))
+        if self.mp1 and self.mp1[0] == 14 and "throttle_status" in self._seen_rows:
+            out += self._smu14_throttle(current.get("throttle_status"))
+        out += self._board_limits()
+        return out
+
+    def _smu14_throttle(self, row: Optional[dict]) -> list[Sensor]:
+        """SMU14 raw throttle_status decoded with THROTTLER_*_BIT names (smu14_driver_if_v14_0.h).
+        The driver's independent map drops hotspot GFX/SoC, PLX and DVO; these rows don't."""
+        raw = row.get("value") if row else None
+        val = None if raw is None else int(raw)
+        active = ppt.decode_smu14_throttle(val)
+        g, P = self._grp("throttle"), self.prefix
+        hint = "gpu_metrics throttle_status, SMU14 bit names" + \
+               ("" if active is None else " = " + (", ".join(active) if active else "none"))
+        out = [Sensor(f"{P}.smu14.throttle.count", g, "Active throttle reasons (SMU14)",
+                      None if active is None else float(len(active)), "", 0, hint)]
+        for key, label, bits in ppt.SMU14_THROTTLER_CLASSES:
+            names = [ppt.SMU14_THROTTLER_BITS[b] for b in bits]
+            out.append(Sensor(f"{P}.smu14.throttle.{key}", g, f"{label} (SMU14)",
+                              None if val is None else float(any(val & (1 << b) for b in bits)), "", 0,
+                              "1 = throttling; bits " + ", ".join(names)))
+        return out
+
+    def _board_limits(self) -> list[Sensor]:
+        """Static limits from the SMU14 pp_table (firmware): rated clocks, power, current, temps."""
+        pt = self.pptable
+        if not pt:
+            return []
+        g, P, out = self._grp("limits"), self.prefix, []
+        src = "pp_table (SMU 14.0.2 powerplay table from PMFW)"
+        add = lambda sid, label, v, unit, dec=0, h="": out.append(  # noqa: E731
+            Sensor(f"{P}.limits.{sid}", g, label, None if v is None else float(v), unit, dec,
+                   f"{src}{'; ' + h if h else ''}"))
+        for k in ("base", "game", "boost"):
+            add(f"clk_{k}", f"Rated {k} clock", pt["clocks"][k] or None, "MHz", 0, "DriverReportedClocks AC")
+        add("ppt0", "Power limit (firmware message limit)", pt["msg_ppt0_ac_w"] or None, "W", 0,
+            ppt.power_cap_note(pt))
+        add("od_ppt_max", "Overdrive power limit max", pt["od_max"]["Ppt"], "%", 0,
+            "OverDriveLimitsBasicMax.Ppt: highest +% the board allows above stock")
+        add("od_ppt_min", "Overdrive power limit min", pt["od_min"]["Ppt"], "%", 0,
+            "OverDriveLimitsBasicMin.Ppt")
+        add("tdc_gfx", "GFX current limit (TDC)", pt["msg_tdc_a"]["gfx"] or None, "A", 0, "MsgLimits.Tdc[GFX]")
+        add("tdc_soc", "SoC current limit (TDC)", pt["msg_tdc_a"]["soc"] or None, "A", 0, "MsgLimits.Tdc[SOC]")
+        add("vmax_gfx", "GFX max voltage limit", pt["vmax_default_mv"]["gfx"] / 1000 or None, "V", 3,
+            "SkuTable.DefaultMaxVoltage[GFX]")
+        add("vmax_gfx_boost", "GFX boost max voltage limit", pt["vmax_boost_mv"]["gfx"] / 1000 or None, "V", 3,
+            "SkuTable.BoostMaxVoltage[GFX] (with FIT controller)")
+        for name, t in pt["temp_limits"].items():
+            if t:
+                add("temp_" + name.lower().replace(" ", "_"), f"{name} temperature limit", t, "°C", 0,
+                    "CustomSkuTable.TemperatureLimit (throttle point)")
+        for name, t in pt["fw_ctf_limits"].items():
+            if t:
+                add("ctf_" + name.lower().replace(" ", "_"), f"{name} shutdown threshold", t, "°C", 0,
+                    "CustomSkuTable.FwCtfLimit (firmware thermal trip)")
+        feats = pt["od_features"]
+        add("od_features", "Overdrive features allowed by board", float(len(feats)), "", 0,
+            "FeatureCtrlMask: " + (", ".join(feats) if feats else "none"))
         return out
 
     # ---- controls --------------------------------------------------------------------
@@ -583,6 +694,8 @@ class AmdGpuBackend(Backend):
             if self.arch in ("RDNA3", "RDNA4"):
                 hint += (" On RDNA3/4 the range above the board's message limit is only offered "
                          "with overdrive enabled (amdgpu.ppfeaturemask bit 0x4000).")
+            if self.pptable and c["n"] == "1":
+                hint += " " + ppt.power_cap_note(self.pptable)
             if not c["writable"]:
                 avail = False
                 hint += root_hint
@@ -625,7 +738,14 @@ class AmdGpuBackend(Backend):
         if not params and not st["exists"]:
             params = self._placeholder_od()
         apu_note = (" APU: requires performance level 'manual' (set it first)." if self.is_apu else "")
+        real = ppt.od_param_ranges(self.pptable) if self.pptable else {}
         for prm in params:
+            if prm.key in real and prm.min is not None and prm.max is not None:
+                lo, hi = max(prm.min, real[prm.key][0]), min(prm.max, real[prm.key][1])
+                if lo <= hi and (lo, hi) != (prm.min, prm.max):
+                    prm.hint += (f" OD_RANGE shows {prm.min}..{prm.max}, but the driver validates this field "
+                                 f"against the board's pp_table range {lo}..{hi}; meat3 uses that.")
+                    prm.min, prm.max = lo, hi
             avail = prm.available and od_avail and prm.min is not None and prm.max is not None
             hint = prm.hint
             if prm.min is not None and prm.max is not None:
@@ -717,6 +837,10 @@ class AmdGpuBackend(Backend):
             if t == "power_cap":
                 uw = int(round(v * 1_000_000))
                 self._write(meta["path"], f"{uw}\n")
+                back = _int(SysfsIO.read(meta["path"]))
+                if back is not None and abs(back - uw) >= 1_000_000:
+                    return True, (f"power limit requested {v} W, driver applied {back / 1e6:g} W "
+                                  f"(above the firmware limit it is set as a whole-% overdrive step)")
                 return True, f"power limit set to {v} W"
             if t == "perf_level":
                 self._write(meta["path"], f"{v}\n")
@@ -733,7 +857,7 @@ class AmdGpuBackend(Backend):
             if t == "od":
                 return self._apply_od(meta["param"], v, specs)
         except OSError as e:
-            return False, f"write failed: {os.strerror(e.errno) if e.errno else e} " \
+            return False, f"write failed: {e.strerror or (os.strerror(e.errno) if e.errno else e)} " \
                           f"(driver rejected the value or insufficient permissions)"
         return False, "not supported"
 
@@ -765,8 +889,17 @@ class AmdGpuBackend(Backend):
                                    f"set it first (fan curve points are written as temp+speed pairs)")
         path = os.path.join(self.dev, prm.file)
         cmd = prm.command(v)
-        self._write(path, cmd + "\n")
-        self._write(path, "c\n")
+        km = _KmsgTail()
+        try:
+            self._write(path, cmd + "\n")
+            self._write(path, "c\n")
+        except OSError as e:
+            why = km.amdgpu_lines()
+            if why:
+                raise OSError(e.errno, f"{os.strerror(e.errno) if e.errno else e}; driver said: {why}") from e
+            raise
+        finally:
+            km.close()
         return True, f"{prm.label} set to {v} {prm.unit} ('{cmd}' + commit)"
 
 

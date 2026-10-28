@@ -44,6 +44,7 @@ class CoresPage(QWidget):
         self.store = store
         self.osd_items: set[str] = set()
         self.tables: dict[str, QTableWidget] = {}
+        self.titles: dict[str, tuple[QLabel, str]] = {}
         self.layout_ids: dict[str, list[list[Optional[str]]]] = {}   # prefix -> rows -> col sid
         self.cols: dict[str, list[tuple[str, int, bool]]] = {}        # prefix -> visible (header, col idx, is_max)
         self.lay = QVBoxLayout(self)
@@ -80,7 +81,9 @@ class CoresPage(QWidget):
                 if with_max:
                     cols.append((hdr + MAX_SUFFIX, ci, True))
         first = sens.get(f"{prefix}.core{cores[0]}.clk_eff", {})
-        title = QLabel(f"<b>{(first.get('group') or prefix).split('/')[0]}</b> — {len(cores)} cores")
+        title = QLabel()
+        self.titles[prefix] = (title, f"<b>{(first.get('group') or prefix).split('/')[0]}</b> — {len(cores)} cores")
+        title.setText(self.titles[prefix][1])
         t = QTableWidget(len(cores), len(cols))
         t.setHorizontalHeaderLabels([c[0] for c in cols])
         t.setVerticalHeaderLabels([f"Core {k}" for k in cores])
@@ -114,6 +117,16 @@ class CoresPage(QWidget):
         sens = self.store.sensors
         th = theme()
         for p, t in self.tables.items():
+            lbl, base = self.titles[p]
+            l3 = []
+            for i in range(16):
+                occ = sens.get(f"{p}.l3.ccd{i}.occupancy", {}).get("value")
+                if f"{p}.l3.ccd{i}.occupancy" not in sens:
+                    break
+                pct = sens.get(f"{p}.l3.ccd{i}.occupancy_pct", {}).get("value")
+                if occ is not None:
+                    l3.append(f"CCD {i} L3 {occ:.1f} MB" + (f" ({pct:.0f}%)" if pct is not None else ""))
+            lbl.setText(base + ("  ·  " + "  ·  ".join(l3) if l3 else ""))
             rows, cols = self.layout_ids[p], self.cols[p]
             # highlight the fastest core (by effective clock) and the hottest core
             best = {}

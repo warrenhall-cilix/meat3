@@ -647,5 +647,51 @@ class TestGeneric(Base):
         self.assertEqual(self.get("sys/devices/system/cpu/cpufreq/policy2/scaling_max_freq"), "4000000")
 
 
+class TestResctrlL3(unittest.TestCase):
+    """L3 occupancy per L3 domain (CCD) and MBM bandwidth from a fake resctrl tree."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="meat3-resctrl-")
+        self.mon = {}
+        for cid, cpus in ((0, (0, 1)), (1, (8, 9))):
+            for c in cpus:
+                d = os.path.join(self.tmp, f"devices/system/cpu/cpu{c}/cache/index3")
+                os.makedirs(d)
+                open(os.path.join(d, "id"), "w").write(f"{cid}\n")
+                open(os.path.join(d, "size"), "w").write("32768K\n")
+            m = os.path.join(self.tmp, f"fs/resctrl/mon_data/mon_L3_{cid:02d}")
+            os.makedirs(m)
+            self.mon[cid] = m
+        self.write(0, 16_777_216, 1_000_000_000)
+        self.write(1, 33_554_432, 0)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def write(self, cid, occ, mbm):
+        open(os.path.join(self.mon[cid], "llc_occupancy"), "w").write(f"{occ}\n")
+        open(os.path.join(self.mon[cid], "mbm_total_bytes"), "w").write(f"{mbm}\n")
+
+    def test_occupancy_and_bandwidth(self):
+        r = cpu_amd.ResctrlL3(self.tmp, {}, time.monotonic)
+        s = r.sample(10.0)
+        self.assertEqual(s[0]["occ"], 16_777_216)
+        self.assertEqual(s[1]["size"], 32 << 20)
+        self.assertNotIn("mbm_rate", s[0])            # first sample: no rate yet
+        self.write(0, 16_777_216, 3_000_000_000)
+        s = r.sample(12.0)
+        self.assertAlmostEqual(s[0]["mbm_rate"], 1e9)
+        self.assertIsNone(r.error)
+
+    def test_unmounted_outside_real_sys(self):
+        empty = tempfile.mkdtemp(prefix="meat3-resctrl-none-")
+        try:
+            r = cpu_amd.ResctrlL3(empty, {}, time.monotonic)
+            self.assertEqual(r.sample(1.0), {})
+            self.assertIn("resctrl", r.error)
+        finally:
+            shutil.rmtree(empty, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

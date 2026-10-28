@@ -549,5 +549,66 @@ class TestRaphaelLive(unittest.TestCase):
                          [(od, "s 1 2000\n"), (od, "c\n")])
 
 
+# ------------------------------------------------------------------------------------
+class TestRdna4Extras(TreeCase):
+    """SMU14 pp_table limits, real per-field OD ranges, SMU14 throttle names, hwmon limits."""
+
+    def test_pptable_roundtrip(self):
+        from meat3.backends import amdgpu_pptable as P
+        blob = P.build_blob({"clocks": (2400, 2450, 3100), "msg_ppt0_ac_w": 340,
+                             "od_max": {"Ppt": 15, "UclkFmax": 1400}})
+        pt = P.parse(blob)
+        self.assertEqual(pt["clocks"], {"base": 2400, "game": 2450, "boost": 3100})
+        self.assertEqual(pt["msg_ppt0_ac_w"], 340)
+        self.assertEqual(pt["od_max"]["Ppt"], 15)
+        self.assertEqual(P.od_param_ranges(pt)["mclk_max"], (1258, 1400))
+        self.assertEqual(pt["temp_limits"]["Hotspot"], 110)
+        self.assertIn("Memory clock", pt["od_features"])
+        self.assertIsNone(P.parse(blob[:-1]))          # wrong size = not an SMU14 table
+        self.assertIsNone(P.parse(None))
+
+    def test_board_limit_sensors(self):
+        ss = {s.id: s for s in self.be.sensors()}
+        v = lambda i: ss["amdgpu0.limits." + i].value  # noqa: E731
+        self.assertEqual(v("clk_boost"), 2970.0)
+        self.assertEqual(v("ppt0"), 304.0)
+        self.assertEqual(v("od_ppt_max"), 10.0)
+        self.assertEqual(v("temp_hotspot"), 110.0)
+        self.assertEqual(v("ctf_hotspot"), 115.0)
+        self.assertAlmostEqual(v("vmax_gfx"), 1.15)
+        self.assertNotIn("amdgpu0.limits.temp_liquid_0", ss)       # 0 = not used on this board
+        self.assertEqual(ss["amdgpu0.hwmon.temp2_crit"].value, 110.0)
+        self.assertIn("Board limits", ss["amdgpu0.limits.ppt0"].group)
+
+    def test_mclk_real_ranges(self):
+        cs = {c.id: c for c in self.be.controls()}
+        self.assertEqual((cs["amdgpu0.oc.od.mclk_min"].min, cs["amdgpu0.oc.od.mclk_min"].max), (97, 1258))
+        self.assertEqual((cs["amdgpu0.oc.od.mclk_max"].min, cs["amdgpu0.oc.od.mclk_max"].max), (1258, 1500))
+        self.assertIn("pp_table range", cs["amdgpu0.oc.od.mclk_max"].hint)
+        self.assertIn("message limit 304 W", cs["amdgpu0.oc.power_cap"].hint)
+        ok, msg = self.be.apply("amdgpu0.oc.od.mclk_max", 1200)    # inside OD_RANGE union, outside real
+        self.assertFalse(ok, msg)
+        self.assertEqual(self.rec.calls, [])
+
+    def test_smu14_throttle_names(self):
+        from meat3.backends import amdgpu_pptable as P
+        self.assertEqual(P.decode_smu14_throttle((1 << 2) | (1 << 14) | (1 << 20)),
+                         ["TEMP_HOTSPOT_GFX", "PPT0", "GFX_DVO"])
+        ss = {s.id: s for s in self.be.sensors()}
+        self.assertIn("amdgpu0.smu14.throttle.count", ss)
+        for k in ("power", "current", "thermal", "other"):
+            self.assertIn(f"amdgpu0.smu14.throttle.{k}", ss)
+
+    def test_power_cap_readback_reported(self):
+        def writer(path, data):
+            self.rec(path, data)
+            with open(path, "w") as fh:        # driver rounds 330 W down to a whole OD % step
+                fh.write("327000000\n")
+        self.be.io.writer = writer
+        ok, msg = self.be.apply("amdgpu0.oc.power_cap", 330)
+        self.assertTrue(ok, msg)
+        self.assertIn("applied 327 W", msg)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

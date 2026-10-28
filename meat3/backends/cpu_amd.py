@@ -23,10 +23,12 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import glob
 import os
 import platform
 import re
 import struct
+import subprocess
 import sys
 import time
 from typing import Any, Optional
@@ -299,6 +301,73 @@ def zen_generation(family: int, model: int) -> str:
     return f"family {family:#x}"
 
 
+class ResctrlL3:
+    """L3 occupancy + MBM bandwidth per L3 domain via the resctrl filesystem (AMD QoS monitoring,
+    cpuinfo flags cqm_occup_llc / cqm_mbm_total). The daemon mounts resctrl if needed (root only,
+    real /sys only); MEAT3_NO_RESCTRL=1 disables this."""
+
+    def __init__(self, sys_root: str, env, clock):
+        self.sys_root = sys_root
+        self.base = os.path.join(sys_root, "fs/resctrl")
+        self.clock = clock
+        self.error: Optional[str] = None
+        self.prev: dict[int, tuple[float, int]] = {}
+        self.sizes = self._cache_sizes()
+        if env.get("MEAT3_NO_RESCTRL") == "1":
+            self.error = "disabled (MEAT3_NO_RESCTRL=1)"
+        elif not os.path.isdir(os.path.join(self.base, "mon_data")):
+            self._mount()
+
+    def _cache_sizes(self) -> dict[int, int]:
+        sizes: dict[int, int] = {}
+        for d in glob.glob(os.path.join(self.sys_root, "devices/system/cpu/cpu[0-9]*/cache/index3")):
+            cid, sz = read_str(os.path.join(d, "id")), read_str(os.path.join(d, "size"))
+            m = re.match(r"(\d+)([KMG]?)", sz or "")
+            if cid is None or not m:
+                continue
+            mult = {"": 1, "K": 1024, "M": 1 << 20, "G": 1 << 30}[m.group(2)]
+            sizes[int(cid)] = int(m.group(1)) * mult
+        return sizes
+
+    def _mount(self) -> None:
+        if self.sys_root != "/sys" or os.geteuid() != 0:
+            self.error = "resctrl not mounted (mount -t resctrl resctrl /sys/fs/resctrl, needs root)"
+            return
+        try:
+            with open("/proc/filesystems") as f:
+                if "resctrl" not in f.read():
+                    self.error = "kernel without resctrl (CONFIG_X86_CPU_RESCTRL)"
+                    return
+            os.makedirs(self.base, exist_ok=True)
+            r = subprocess.run(["mount", "-t", "resctrl", "resctrl", self.base], capture_output=True,
+                               text=True, timeout=5)
+            if r.returncode != 0:
+                self.error = f"mount resctrl failed: {r.stderr.strip() or r.returncode}"
+        except (OSError, subprocess.SubprocessError) as e:
+            self.error = f"mount resctrl failed: {e}"
+
+    def sample(self, now: float) -> dict[int, dict]:
+        out: dict[int, dict] = {}
+        for d in sorted(glob.glob(os.path.join(self.base, "mon_data/mon_L3_*"))):
+            try:
+                cid = int(d.rsplit("_", 1)[1])
+            except ValueError:
+                continue
+            occ = read_int(os.path.join(d, "llc_occupancy"))
+            rec = {"occ": occ, "size": self.sizes.get(cid), "has_mbm": os.path.exists(os.path.join(d, "mbm_total_bytes"))}
+            if rec["has_mbm"]:
+                tot = read_int(os.path.join(d, "mbm_total_bytes"))
+                if tot is not None:
+                    pv = self.prev.get(cid)
+                    if pv and now > pv[0] and tot >= pv[1]:
+                        rec["mbm_rate"] = (tot - pv[1]) / (now - pv[0])
+                    self.prev[cid] = (now, tot)
+            out[cid] = rec
+        if not out and self.error is None:
+            self.error = "resctrl mounted but no L3 monitoring domains (CPU lacks cqm_occup_llc?)"
+        return out
+
+
 class AmdCpuBackend(Backend):
     kind = "cpu"
 
@@ -327,6 +396,7 @@ class AmdCpuBackend(Backend):
         if perf == "auto":
             perf = PerfEvents()
         self.uncore = UncoreCounters(sys_root, perf, self.family, self.model, clock)
+        self.resctrl = ResctrlL3(sys_root, self.env, clock)
         self.msr_prev: dict[tuple[int, int], tuple[float, int]] = {}
         self.energy_unit: Optional[float] = None
         self.energy_rates = cc.RateTracker(wrap=1 << 32)
@@ -491,6 +561,7 @@ class AmdCpuBackend(Backend):
         out += pm
         out += self._core_summary(pm)
         out += self._uncore(pm)
+        out += self._l3_occupancy(now)
         out += self._misc()
         return out
 
@@ -622,6 +693,29 @@ class AmdCpuBackend(Backend):
         out.append(Sensor(f"{p}.mem.umc_clk", gm, "Memory clock (UMC counter)",
                           (sum(clks) / len(clks)) if clks else None, "MHz", 0,
                           "umc_mem_clk event 0x00 rate (should equal PM-table MCLK)"))
+        return out
+
+    def _l3_occupancy(self, now: float) -> list[Sensor]:
+        """L3 occupancy (MB in use) and memory bandwidth per L3 domain (= per CCD on Ryzen) from resctrl."""
+        r = self.resctrl
+        doms = r.sample(now)
+        p, gl, out = self.prefix, f"{self.g}/L3 cache", []
+        if not doms:
+            out.append(Sensor(f"{p}.l3.ccd0.occupancy", gl, "L3 in use", None, "MB", 1,
+                              r.error or "resctrl L3 monitoring unavailable"))
+            return out
+        multi = len(doms) > 1
+        for i, (cid, d) in enumerate(sorted(doms.items())):
+            tag = f"CCD {i} L3" if multi else "L3"
+            hint = f"resctrl mon_data/mon_L3_{cid:02d}/llc_occupancy (AMD L3 cache occupancy monitoring)"
+            occ, size = d.get("occ"), d.get("size")
+            out.append(Sensor(f"{p}.l3.ccd{i}.occupancy", gl, f"{tag} in use", None if occ is None else occ / 1e6,
+                              "MB", 1, hint))
+            if size:
+                out.append(Sensor(f"{p}.l3.ccd{i}.occupancy_pct", gl, f"{tag} in use (% of {size / 1048576:.0f} MiB)",
+                                  None if occ is None else min(100.0, 100.0 * occ / size), "%", 1, hint))
+            # MBM (mbm_total_bytes) is not published: on Granite Ridge with kernel 7.3 in mbm_event
+            # (ABMC) mode the counter sits at a constant ~2^50; DRAM bandwidth comes from the UMC PMU.
         return out
 
     def _misc(self) -> list[Sensor]:

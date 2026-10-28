@@ -19,6 +19,8 @@ import struct
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.abspath(os.path.join(HERE, "..", "..", "..")))
+from meat3.backends import amdgpu_pptable  # noqa: E402
 SLOT = "0000:03:00.0"
 U16, U32, U64 = 0xFFFF, 0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF
 
@@ -157,6 +159,8 @@ def build(root: str, od: bool = True) -> str:
         "pp_dpm_pcie": "0: 2.5GT/s, x1 619Mhz \n1: 32.0GT/s, x16 1143Mhz *\n",
         "power_dpm_force_performance_level": "auto\n",
         "pp_power_profile_mode": pp_power_profile_mode(1),
+        # SMU 14.0.2 combo pptable: real per-field OD ranges are narrower than OD_RANGE's MCLK union
+        "pp_table": amdgpu_pptable.build_blob(),
     }
     hw = "hwmon/hwmon3/"
     hwmon = {
