@@ -22,6 +22,10 @@ DEFAULTS = {
         "items": [],
     },
     "poll_interval_s": 1.0,
+    # L3 cache occupancy per application/game (AMD/Intel resctrl monitoring groups; root daemon).
+    # top: how many of the busiest apps get their own group; game_patterns: process names that
+    # count as games besides Steam titles (detected via SteamAppId).
+    "l3_per_app": {"enabled": True, "top": 8, "game_patterns": ["*.exe"]},
     # AMD Ryzen SMU overclocking (Curve Optimizer, PBO PPT/TDC/EDC) via ryzen_smu.
     # Validated on Granite Ridge (9800X3D): CO all/per-core write+readback+stress, PPT write+readback.
     "amd_smu_controls": True,

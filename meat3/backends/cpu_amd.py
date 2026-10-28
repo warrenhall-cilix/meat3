@@ -38,6 +38,8 @@ from meat3.backends import _cpu_common as cc
 from meat3.backends._cpu_common import read_int, read_str
 from meat3.backends import pm_tables
 from meat3.backends import amd_smu
+from meat3.backends import l3apps
+from meat3.core import config
 
 # --------------------------------------------------------------------------- MSRs
 MSR_TSC = 0x10
@@ -313,10 +315,17 @@ class ResctrlL3:
         self.error: Optional[str] = None
         self.prev: dict[int, tuple[float, int]] = {}
         self.sizes = self._cache_sizes()
+        self.apps: Optional[l3apps.L3Apps] = None
         if env.get("MEAT3_NO_RESCTRL") == "1":
             self.error = "disabled (MEAT3_NO_RESCTRL=1)"
-        elif not os.path.isdir(os.path.join(self.base, "mon_data")):
+            return
+        if not os.path.isdir(os.path.join(self.base, "mon_data")):
             self._mount()
+        cfg = config.get().get("l3_per_app") or {}
+        if (cfg.get("enabled", True) and sys_root == "/sys" and os.geteuid() == 0
+                and os.path.isdir(os.path.join(self.base, "mon_groups"))):
+            self.apps = l3apps.L3Apps(self.base, top=int(cfg.get("top", 8)),
+                                      game_patterns=cfg.get("game_patterns"))
 
     def _cache_sizes(self) -> dict[int, int]:
         sizes: dict[int, int] = {}
@@ -716,6 +725,57 @@ class AmdCpuBackend(Backend):
                                   None if occ is None else min(100.0, 100.0 * occ / size), "%", 1, hint))
             # MBM (mbm_total_bytes) is not published: on Granite Ridge with kernel 7.3 in mbm_event
             # (ABMC) mode the counter sits at a constant ~2^50; DRAM bandwidth comes from the UMC PMU.
+        out += self._l3_apps(now, doms)
+        return out
+
+    def _l3_apps(self, now: float, doms: dict) -> list[Sensor]:
+        a = self.resctrl.apps
+        if a is None:
+            return []
+        try:
+            res = a.sample(now)
+        except OSError as e:
+            a.error = str(e)
+            return []
+        p, g, out = self.prefix, f"{self.g}/L3 by app", []
+        size = sum(d.get("size") or 0 for d in doms.values()) or None
+        multi = len(doms) > 1
+        hint0 = ("resctrl monitoring group per app (threads of the app tagged with their own RMID); "
+                 "lines count toward the app that filled them")
+        tot = lambda occ: sum(v for v in occ.values() if v is not None) if any(  # noqa: E731
+            v is not None for v in occ.values()) else None
+        apps_sum = 0
+        games = [r for r in res["apps"] if r["game"]]
+        game = max(games, key=lambda r: r["cpu"]) if games else None
+        for r in res["apps"]:
+            b = tot(r["occ"])
+            apps_sum += b or 0
+            sid = l3apps.slug(r["key"])
+            h = (f"{hint0}. {r['procs']} process(es), {r['threads']} thread(s), CPU {r['cpu']:.1f}%"
+                 + (" [game]" if r["game"] else ""))
+            if multi:
+                h += "; per CCD: " + ", ".join(f"CCD {i} {(v or 0) / 1e6:.1f} MB"
+                                               for i, (_, v) in enumerate(sorted(r["occ"].items())))
+            out.append(Sensor(f"{p}.l3app.{sid}.occupancy", g, f"{r['name']} L3 in use",
+                              None if b is None else b / 1e6, "MB", 1, h))
+            out.append(Sensor(f"{p}.l3app.{sid}.cpu", g, f"{r['name']} CPU usage", r["cpu"], "%", 1,
+                              "share of all CPU threads, smoothed"))
+        # use the same occupancy read as the "L3 in use" rows so the numbers add up
+        b = tot({cid: d.get("occ") for cid, d in doms.items()}) if doms else tot(res["total"])
+        out.append(Sensor(f"{p}.l3app.other.occupancy", g, "Everything else L3 in use",
+                          None if b is None else max(0.0, b - apps_sum) / 1e6, "MB", 1,
+                          "whole L3 occupancy minus the tracked apps"))
+        gb = tot(game["occ"]) if game else None
+        out.append(Sensor(f"{p}.l3app.game.occupancy", g, "Game L3 in use",
+                          None if gb is None else gb / 1e6, "MB", 1,
+                          (f"game: {game['name']} (" + ("Steam app " + game["key"][6:] if game["key"].startswith("steam:")
+                                                        else "name match") + ")") if game else
+                          "no game running (Steam titles via SteamAppId, others by l3_per_app.game_patterns)"))
+        out.append(Sensor(f"{p}.l3app.game.occupancy_pct", g, "Game L3 share",
+                          None if gb is None or not size else 100.0 * gb / size, "%", 1,
+                          "game's L3 occupancy as % of total L3 size"))
+        if a.error:
+            out[-1].hint += f"; note: {a.error}"
         return out
 
     def _misc(self) -> list[Sensor]:
@@ -757,6 +817,8 @@ class AmdCpuBackend(Backend):
     def close(self) -> None:
         self.msr.close()
         self.uncore.close()
+        if self.resctrl.apps:
+            self.resctrl.apps.close()
 
 
 BACKENDS = [AmdCpuBackend]

@@ -206,6 +206,11 @@ def _exercise(app, w, tmp, sock, osd_file, mock):
     _pump(app, 0.3)
     assert vid in w.osd.items
     cp.osd_toggle_requested.emit(vid, False)
+    _pump(app, 1.2)
+    at = cp.app_table
+    assert at is not None and at.rowCount() == 3, at and at.rowCount()
+    assert at.item(0, 0).text() == "Cyberpunk2077.exe", at.item(0, 0).text()
+    assert "Game" in cp.app_title.text() and "Cyberpunk2077.exe" in cp.app_title.text()
     w.grab().save(str(SHOTS / "cores-dark.png"))
 
     # --- overclock tab: apply through the row code path

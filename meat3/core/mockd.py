@@ -507,6 +507,20 @@ class MockRyzen9800X3D(MockBackend):
             S("Cores", f"{P}.cores_power", "Cores power", cores_w, "W", 1),
         ]
         out = summary + out
+        g_occ = 58 + 6 * load + n(1.5)
+        ff = 9 + n(0.8)
+        out += [
+            S("L3 cache", f"{P}.l3.ccd0.occupancy", "L3 in use", g_occ + ff + 12, "MB", 1),
+            S("L3 cache", f"{P}.l3.ccd0.occupancy_pct", "L3 in use (% of 96 MiB)",
+              100 * (g_occ + ff + 12) / 100.663296, "%", 1),
+            S("L3 by app", f"{P}.l3app.steam_1091500.occupancy", "Cyberpunk2077.exe L3 in use", g_occ, "MB", 1),
+            S("L3 by app", f"{P}.l3app.steam_1091500.cpu", "Cyberpunk2077.exe CPU usage", 48 * load + 5, "%", 1),
+            S("L3 by app", f"{P}.l3app.firefox.occupancy", "firefox L3 in use", ff, "MB", 1),
+            S("L3 by app", f"{P}.l3app.firefox.cpu", "firefox CPU usage", 2.5, "%", 1),
+            S("L3 by app", f"{P}.l3app.other.occupancy", "Everything else L3 in use", 12, "MB", 1),
+            S("L3 by app", f"{P}.l3app.game.occupancy", "Game L3 in use", g_occ, "MB", 1,
+              "game: Cyberpunk2077.exe (Steam app 1091500)"),
+        ]
         out += [
             S("Temperatures", f"{P}.temp.tctl", "Tctl/Tdie", tctl, "°C", 1),
             S("Temperatures", f"{P}.temp.ccd1", "CCD1 (Tdie)", tctl - 3 + n(0.3), "°C", 1),
