@@ -117,11 +117,23 @@ a 7.3 kernel with a non-RDNA4 GPU.
   verified on hardware.
 - **VRM telemetry over PMBus.** The voltage regulators at 0x22/0x24/0x26 on the GPU's own "AMDGPU SMU"
   I2C buses: measured voltage, current, power and temperature per rail, plus input voltage/current.
-- **VRM voltage offsets** (Overclock → VRM voltage offsets). Writes PMBus `VOUT_CAL_OFFSET`, which
-  can add voltage the driver doesn't allow. Off unless `"amdgpu_vrm": {"allow_writes": true}` is set
-  in `/etc/meat3/config.json`, clamped to ±`max_offset_mv` (50), only for regulators in linear
-  VOUT mode, read back after every write. A power cycle restores the factory value; "restore factory
-  offset" writes back the value meat3 saw first. RDNA4 partly compensates for these offsets.
+  **Real power (VRM measured)** is the larger of the 12 V input power into the regulators and the
+  rail output power ÷ 0.9. It's measured at the regulators, so it stays correct on cards whose
+  board-power shunts are bridged or shunt-modded. On those cards the driver's power reads near zero,
+  and meat3 flags it as "Board power sensing: BYPASSED". A guard (disabled by default) cuts the GPU
+  clock when real power stays above a limit. Enable it with e.g.
+  `"guard_overrides": {"AMD real power (VRM) over limit": {"above": 420, "enabled": true}}`.
+- **VRM voltage, load line and current scale** (Overclock → VRM voltage offsets). All off unless
+  `"amdgpu_vrm": {"allow_writes": true}` is set in `/etc/meat3/config.json`, read back after every
+  write, and volatile (a power cycle restores factory). "Restore factory settings" writes back what
+  meat3 saw first.
+  - **Voltage offset** (`VOUT_CAL_OFFSET`): adds voltage the driver doesn't allow, ±`max_offset_mv`
+    (50). Linear VOUT mode regulators only. RDNA4 partly compensates for it.
+  - **Load line** (`VOUT_DROOP`): less sag under load. 0 to 2× factory.
+  - **Current reporting scale** (`IOUT_CAL_GAIN`): the regulator reports current ÷ k, so the
+    firmware's current limit (TDC 330 A GFX / 88 A SoC on every 9070 XT) effectively becomes ×k. The
+    regulator's own over-current protection moves with it. meat3 corrects its own current and power
+    readings, including the hidden firmware metrics. Capped by `max_current_scale` (1.5).
 - **`meat3-gputune`**: automatic undervolt finder. It steps the GFX voltage offset down 10 mV at a
   time while you run a demanding game or benchmark (or `--load CMD`). A step only counts while the
   GPU is ≥85% busy, and fails on any amdgpu timeout, reset or page fault in the kernel log. It's

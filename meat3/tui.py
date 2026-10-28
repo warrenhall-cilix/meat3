@@ -104,6 +104,8 @@ HEADLINES = {
                (r"gm\.temperature_(edge|gfx)$", "Edge/GFX temp", 100),
                (r"gm\.temperature_hotspot$", "Hotspot", 110), (r"gm\.temperature_mem$", "Memory temp", 105),
                (r"gm\.(average|current)_socket_power$", "Power", "@hwmon.power1_cap"),
+               (r"vrm\.real_power$", "Real power (VRM)", None), (r"vrm\.vgfx\.iout$", "GFX current", 330.0),
+               (r"fm\.thr\.tdc_gfx$", "TDC-limited", 100), (r"fm\.thr\.vmax$", "Vmax-limited", 100),
                (r"gm\.average_gfx_activity$", "GFX load", 100), (r"smu14\.throttle\.count$", "Throttling", None),
                (r"hwmon\.fan1$", "Fan", None)],
     "cpu": [(r"clk\.eff_avg$", "Avg clock", "@clk.eff_max"), (r"clk\.eff_max$", "Peak clock", None),

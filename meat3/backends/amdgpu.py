@@ -594,6 +594,7 @@ class AmdGpuBackend(Backend):
         for plane, label in (("VDD_GFX", "GFX"), ("VDD_SOC", "SoC"), ("VDDCI_MEM", "VDDCI (memory I/O)"),
                              ("VDDIO_MEM", "VDDIO (memory)")):
             mv, a = m["AvgVoltage"][plane], m["AvgCurrent"][plane]
+            a = a * self._vrm_scale(plane)          # firmware sees reported current; show the real one
             sid = plane.lower()
             if plane == "VDDCI_MEM":       # the only rail voltage gpu_metrics doesn't already have
                 S(f"v.{sid}", "volt", f"{label} rail voltage", mv / 1000, "V", 3, "AvgVoltage (SVI3)")
@@ -617,6 +618,14 @@ class AmdGpuBackend(Backend):
             S("thr." + name.lower().replace(" ", "_").replace("+", "p"), "throttle", f"Limited by {name}",
               float(pct), "%", 0, "ThrottlingPercentage: share of time this limit was active")
         return out
+
+    def _vrm_scale(self, plane: str) -> float:
+        """Current-reporting scale set on the regulator feeding this SVI plane (1.0 if none)."""
+        v = self.vrm
+        key = {"VDD_GFX": (0x22, 0), "VDD_SOC": (0x24, 0)}.get(plane)
+        if v is None or key is None or not v.last:
+            return 1.0
+        return float(v.last.get(key, {}).get("scale", 1.0))
 
     def _smu14_throttle(self, row: Optional[dict]) -> list[Sensor]:
         """SMU14 raw throttle_status decoded with THROTTLER_*_BIT names (smu14_driver_if_v14_0.h).
@@ -903,9 +912,27 @@ class AmdGpuBackend(Backend):
         if not v.controllers:
             return [Sensor(f"{P}.vrm.status", G, "VRM controllers: none found", None, hint=v.error or "")]
         data = v.read_all()
-        out = [Sensor(f"{P}.vrm.status", G, "VRM: " + ", ".join(
+        pw = vrmm.VrmAccess.power_summary(data)
+        board = next((self._seen_rows.get(k, {}).get("value") for k in ("average_socket_power", "curr_socket_power")
+                      if self._seen_rows.get(k, {}).get("value") is not None), None)
+        bypass = vrmm.shunt_bypassed(board, pw["real_w"])
+        out = [Sensor(f"{P}.vrm.real_power", G, "Real power (VRM measured)", pw["real_w"], "W", 0,
+                      "max(12 V input VIN x IIN over all controllers, corrected rail output / "
+                      f"{vrmm.VRM_EFFICIENCY:.2f}); measured at the regulators, so still right with the "
+                      "board-power shunts bypassed. Excludes fans/LEDs and the PCIe slot's 3.3 V."),
+               Sensor(f"{P}.vrm.input_power", G, "VRM 12 V input power", pw["input_w"], "W", 0,
+                      "sum of READ_VIN x READ_IIN (page 0 of each controller)"),
+               Sensor(f"{P}.vrm.rails_power", G, "VRM output power (all rails)", pw["rails_w"], "W", 0,
+                      "sum of READ_POUT x current scale"),
+               Sensor(f"{P}.vrm.shunt_bypass", G,
+                      "Board power sensing: BYPASSED (driver power is not real)" if bypass else "Board power sensing: normal",
+                      1.0 if bypass else 0.0, "", 0,
+                      f"driver/firmware board power {board if board is not None else '?'} W vs regulators "
+                      f"{pw['real_w'] or 0:.0f} W; bypassed = shunt sense shorted, so the firmware power limit no "
+                      "longer applies. Use the real power sensor (and its guard) instead.")]
+        out.append(Sensor(f"{P}.vrm.status", G, "VRM: " + ", ".join(
             f"0x{c.addr:02x} {c.mfr} {c.model}".strip() for c in v.controllers), float(len(v.controllers)), "", 0,
-            "PMBus controllers on the GPU's SMU I2C bus; read via standard telemetry commands")]
+            "PMBus controllers on the GPU's SMU I2C bus; read via standard telemetry commands"))
         for (addr, page), r in sorted(data.items()):
             key, label = vrmm.RAILS[(addr, page)]
             h = f"PMBus 0x{addr:02x} page {page}"
@@ -915,8 +942,19 @@ class AmdGpuBackend(Backend):
             out.append(Sensor(f"{P}.vrm.{key}.vout", G, f"{label} voltage (measured)", r.get("vout"), "V", 3,
                               h + " READ_VOUT" + ("" if r.get("vout") is not None else
                                                   f" (non-linear VOUT_MODE, raw 0x{r['vout_raw']:04x})")))
-            out.append(Sensor(f"{P}.vrm.{key}.iout", G, f"{label} current", r.get("iout"), "A", 1, h + " READ_IOUT"))
-            out.append(Sensor(f"{P}.vrm.{key}.pout", G, f"{label} power", r.get("pout"), "W", 1, h + " READ_POUT"))
+            sc = r.get("scale", 1.0)
+            note = "" if abs(sc - 1) < 0.005 else f" x{sc:.2f} current scale (firmware sees {r.get('iout', 0):.0f} A)"
+            out.append(Sensor(f"{P}.vrm.{key}.iout", G, f"{label} current (real)", r.get("iout_real"), "A", 1,
+                              h + " READ_IOUT" + note))
+            out.append(Sensor(f"{P}.vrm.{key}.pout", G, f"{label} power (real)", r.get("pout_real"), "W", 1,
+                              h + " READ_POUT" + note))
+            if "gain_mohm" in r:
+                out.append(Sensor(f"{P}.vrm.{key}.current_scale", G, f"{label} current reporting scale", sc, "x", 2,
+                                  h + f" IOUT_CAL_GAIN {r['gain_mohm']:.4f} mOhm vs factory; >1 = current under-reported "
+                                  "to the firmware, effective current limit raised by the same factor"))
+            if "droop_mohm" in r:
+                out.append(Sensor(f"{P}.vrm.{key}.llc", G, f"{label} load line", r["droop_mohm"], "mΩ", 3,
+                                  h + " VOUT_DROOP (lower = less voltage sag under load)"))
             out.append(Sensor(f"{P}.vrm.{key}.temp", G, f"{label} VRM temperature", r.get("temp"), "°C", 0,
                               h + " READ_TEMPERATURE_1"))
             if "vin" in r:
@@ -948,8 +986,27 @@ class AmdGpuBackend(Backend):
                                min=-v.max_offset_mv, max=v.max_offset_mv, step=5, unit="mV",
                                default=None if fac_mv is None else round(fac_mv), danger=2, available=ok,
                                hint=(why + ". " if why else "") + warn))
-            out.append(Control(f"{P}.vrm.{key}.reset", G, f"{label}: restore factory offset", "action",
-                               danger=1, available=ok, hint=why or "writes back the value found the first time"))
+            okw, whyw = v.can_write(addr, page, need_linear_vout=False)
+            if "gain_mohm" in r:
+                out.append(Control(f"{P}.vrm.{key}.current_scale", G, f"{label} current reporting scale", "float",
+                                   round(r.get("scale", 1.0), 2), min=1.0, max=v.max_current_scale, step=0.05,
+                                   unit="x", default=1.0, danger=2, available=okw,
+                                   hint=(whyw + ". " if whyw else "") +
+                                   "DANGEROUS: the controller reports current / scale, so the firmware's current "
+                                   "limit (TDC, 330 A GFX / 88 A SoC on RX 9070 XT) becomes limit x scale. The "
+                                   "regulator's own over-current protection moves by the same factor. meat3's current "
+                                   "and power readings are corrected; the firmware's are not. Volatile."))
+            if "droop_mohm" in r:
+                fd = vrmm.linear11(r["droop_factory_raw"])
+                out.append(Control(f"{P}.vrm.{key}.llc", G, f"{label} load line (LLC)", "float",
+                                   round(r["droop_mohm"], 3), min=0.0, max=round(2 * fd, 3), step=round(max(fd / 10, 0.001), 3),
+                                   unit="mΩ", default=round(fd, 3), danger=2, available=okw,
+                                   hint=(whyw + ". " if whyw else "") +
+                                   "VOUT_DROOP. Lower = less voltage drop under load (higher real voltage at "
+                                   "full current, bigger overshoot on load release). 0 = flat. Volatile."))
+            out.append(Control(f"{P}.vrm.{key}.reset", G, f"{label}: restore factory settings", "action",
+                               danger=1, available=okw,
+                               hint=whyw or "writes back the offset, current-sense gain and load line found first"))
         return out
 
     def _vrm_apply(self, control_id: str, value: Any) -> tuple[bool, str]:
@@ -963,8 +1020,14 @@ class AmdGpuBackend(Backend):
         if what == "reset":
             return v.reset(*rail)
         if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return False, "expected a number of mV"
-        return v.set_offset_mv(rail[0], rail[1], float(value))
+            return False, "expected a number"
+        if what == "current_scale":
+            return v.set_current_scale(rail[0], rail[1], float(value))
+        if what == "llc":
+            return v.set_droop_mohm(rail[0], rail[1], float(value))
+        if what == "offset":
+            return v.set_offset_mv(rail[0], rail[1], float(value))
+        return False, f"unknown VRM setting {what}"
 
     # ---- apply -----------------------------------------------------------------------
 

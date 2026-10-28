@@ -42,6 +42,7 @@ PRESETS: dict[str, list[str]] = {
                  r"^(amdgpu|amd)\d+\.(gm\.average_gfxclk_frequency|clk\.gfx)$",
                  r"^(amdgpu|amd)\d+\.(gm\.average_socket_power|pwr\.ppt)$",
                  r"^(amdgpu|amd)\d+\.(gm\.temperature_hotspot|temp\.junction)$",
+                 r"^amdgpu\d+\.vrm\.real_power$",
                  r"^cpu\d*\.(util\.total|usage_total)$", r"^cpu\d*\.clk(\.eff_avg|_eff_avg)$",
                  r"^cpu\d*\.(k10temp\.temp1|temp\.tctl)$", r"^cpu\d*\.pmt\.ppt$",
                  r"^cpu\d*\.l3app\.game\.occupancy$"],
@@ -50,7 +51,8 @@ PRESETS: dict[str, list[str]] = {
     "GPU": [r"^nv\d+\.(clk\.(gpc|mem|xbar)|u\.(gpu|memctl)|pwr\.board_real|t\.(gpu|hotspot|mem)|"
             r"mem\.pct|pins\.(a|max_a)|v\.nvvdd)$",
             r"^(amdgpu|amd)\d+\.(gm\.(average|current)_(gfxclk|uclk)_frequency|gm\.average_gfx_activity|"
-            r"gm\.(average|current)_socket_power|gm\.temperature_(edge|hotspot|mem)|hwmon\.in0)$"],
+            r"gm\.(average|current)_socket_power|gm\.temperature_(edge|hotspot|mem)|hwmon\.in0|"
+            r"vrm\.real_power|vrm\.vgfx\.(iout|vout)|fm\.thr\.(ppt0|tdc_gfx|vmax))$"],
 }
 
 

@@ -36,8 +36,9 @@ DEFAULTS = {
     "l3_reserve": {"enabled": True, "background_mb": 12},
     # RDNA4 VRM controllers over PMBus (GPU's own "AMDGPU SMU" I2C buses, addresses 0x22/0x24/0x26).
     # Telemetry is read-only. Voltage offset writes are off unless allow_writes is true, and are
-    # clamped to +-max_offset_mv. Offsets are volatile: a power cycle restores the factory value.
-    "amdgpu_vrm": {"enabled": True, "allow_writes": False, "max_offset_mv": 50},
+    # clamped to +-max_offset_mv. max_current_scale caps the current-reporting scale (raises the
+    # firmware current limit). All VRM settings are volatile: a power cycle restores the factory values.
+    "amdgpu_vrm": {"enabled": True, "allow_writes": False, "max_offset_mv": 50, "max_current_scale": 1.5},
     # AMD Ryzen SMU overclocking (Curve Optimizer, PBO PPT/TDC/EDC) via ryzen_smu.
     # Validated on Granite Ridge (9800X3D): CO all/per-core write+readback+stress, PPT write+readback.
     "amd_smu_controls": True,
@@ -54,6 +55,10 @@ DEFAULTS = {
          "control": "nv*.oc.power_limit", "value": 300, "enabled": True},
         {"name": "AMD GPU hotspot (junction) overtemp", "sensor": "amdgpu*.hwmon.temp2", "above": 105, "count": 3,
          "control": "amdgpu*.oc.power_cap", "value": "min", "enabled": True},
+        # for RDNA4 cards with the board-power shunts bypassed: the power cap no longer bites, so cut
+        # the GPU clock instead. Set "above" to the real power you allow, then enable it.
+        {"name": "AMD real power (VRM) over limit", "sensor": "amdgpu*.vrm.real_power", "above": 450, "count": 3,
+         "control": "amdgpu*.oc.od.sclk_offset", "value": "min", "enabled": False},
     ],
 }
 
@@ -81,6 +86,10 @@ def load() -> dict:
             # 0.1 shipped "nv*.pin?.a", which also matched the connector total "nv0.pins.a"
             if isinstance(g, dict) and g.get("sensor") == "nv*.pin?.a":
                 g["sensor"] = "nv*.pin[0-9].a"
+            # "guard_overrides": {"<guard name>": {"above": 420, "enabled": true}} tweaks one guard
+            # without copying the whole list
+            if isinstance(g, dict) and isinstance(cfg.get("guard_overrides"), dict):
+                g.update(cfg["guard_overrides"].get(g.get("name"), {}) or {})
         _cfg = cfg
         return cfg
 
