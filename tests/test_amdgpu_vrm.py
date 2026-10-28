@@ -56,6 +56,20 @@ class FakeCtl:
         return r[cmd]
 
 
+class FakeMps(FakeCtl):
+    """MPS MP2686A-style controller: vendor READ_VOUT, 8-bit VOUT_OFFSET steps, no VOUT_DROOP."""
+
+    def __init__(self, pages, vout=1.05, iout=200.0, linear_vout=True, offset_steps=1):
+        super().__init__(pages, mode=0x17, vout=vout, iout=iout, mfr="MPS", model="MP2686A")
+        for p in pages:
+            r = self.regs[p]
+            r[V.READ_VOUT] = 0xE000 | (int(round(vout * 256)) if linear_vout else int(round(vout / 0.005)) - 49)
+            r[V.MPS_MFR_VR_CONFIG2] = V.MPS_VOUT_LINEAR if linear_vout else 0
+            r[V.VOUT_CAL_OFFSET] = offset_steps & 0xFF
+            r.pop(V.VOUT_DROOP)
+        self.mode = 0x40          # VOUT_MODE garbage: must be ignored
+
+
 class FakeBus:
     def __init__(self, ctls):
         self.ctls = ctls
@@ -238,6 +252,43 @@ class TestVrm(Base):
         self.assertEqual(cs["amdgpu0.vrm.vgfx.current_scale"].danger, 2)
         self.assertFalse(cs["amdgpu0.vrm.vgfx.current_scale"].available)    # writes off by default
         self.assertFalse(be.apply("amdgpu0.vrm.vgfx.current_scale", 1.3)[0])
+
+    def test_mps_profile_decode_and_write_gating(self):
+        self.ctls[0x22] = FakeMps([0], vout=1.05)
+        self.ctls[0x24] = FakeMps([0, 1], vout=0.75, iout=30, linear_vout=False)
+        v = self.vrm(allow_writes=True)
+        self.assertEqual([c.profile for c in v.controllers], ["mps", "mps", "generic"])
+        d = v.read_all()
+        self.assertAlmostEqual(d[(0x22, 0)]["vout"], 1.05, places=2)          # 1/256 V linear
+        self.assertAlmostEqual(d[(0x24, 0)]["vout"], 0.75, places=3)          # VR13 VID 5 mV
+        self.assertEqual(d[(0x22, 0)]["offset_steps"], 1)
+        self.assertIsNone(d[(0x22, 0)]["offset_mv"])                          # step size unverified
+        self.assertNotIn("droop_mohm", d[(0x22, 0)])                          # 0x28 never read on MPS
+        ok, why = v.set_offset_mv(0x22, 0, 10)
+        self.assertFalse(ok)
+        self.assertIn("mps_offset_lsb_mv", why)
+        ok, why = v.set_current_scale(0x22, 0, 1.2)
+        self.assertFalse(ok)
+        self.assertIn("experimental_mps_writes", why)
+        self.assertFalse(v.set_droop_mohm(0x22, 0, 0.1)[0])
+        self.assertEqual(self.ctls[0x22].writes, [])
+
+    def test_mps_writes_once_verified(self):
+        self.ctls[0x22] = FakeMps([0], offset_steps=1)
+        v = self.vrm(allow_writes=True, mps_offset_lsb_mv=5, experimental_mps_writes=True)
+        d = v.read_all()
+        self.assertEqual(d[(0x22, 0)]["offset_mv"], 5.0)
+        ok, msg = v.set_offset_mv(0x22, 0, 25)
+        self.assertTrue(ok, msg)
+        self.assertEqual(self.ctls[0x22].writes[-1], (0, V.VOUT_CAL_OFFSET, 5))
+        ok, msg = v.set_offset_mv(0x22, 0, -10)
+        self.assertTrue(ok, msg)
+        self.assertEqual(self.ctls[0x22].writes[-1], (0, V.VOUT_CAL_OFFSET, 0xFE))
+        ok, msg = v.set_current_scale(0x22, 0, 1.3)
+        self.assertTrue(ok, msg)
+        self.assertAlmostEqual(v.read_all()[(0x22, 0)]["iout_real"], 200, delta=1.0)
+        self.assertTrue(v.reset(0x22, 0)[0])
+        self.assertEqual([w for w in self.ctls[0x22].writes if w[1] == V.VOUT_CAL_OFFSET][-1][2], 1)
 
     def test_no_controllers(self):
         self.ctls.clear()

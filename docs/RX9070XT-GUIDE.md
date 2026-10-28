@@ -46,6 +46,14 @@ drops the GPU clock offset to its minimum.
 the same clock, so it buys clocks under the 330 A limit. Then run `sudo meat3-gputune --apply` and
 `--save-boot`.
 
+## Hard ceilings on this card (from its BIOS)
+
+- GPU clock: **3450 MHz** (top firmware clock level; stock boost is 3010 MHz)
+- Memory: **1500** in Linux units (stock 1259, so about 20 → 24 Gbps)
+- Voltage: **1.2 V** requested by the firmware; only a VRM offset goes beyond it
+- Current: **330 A** core, **88 A** SoC; the current scale raises the effective limit
+- Memory timings: no "fast timings" option exists on Linux
+
 ## 5. Raise the limits (dangerous, all reset at power-off)
 
 Enable regulator writes in `/etc/meat3/config.json`:
@@ -54,13 +62,18 @@ Enable regulator writes in `/etc/meat3/config.json`:
 "amdgpu_vrm": {"allow_writes": true, "max_offset_mv": 50, "max_current_scale": 1.5}
 ```
 
+RX 9070 XT boards use MPS MP2686A controllers. Their voltage-offset step size and current-gain
+encoding must be confirmed from your `collect_amdgpu.sh` dump first. Until then meat3 keeps those
+writes locked, even with `allow_writes`. Once confirmed, add `"mps_offset_lsb_mv": 5` (or 6.25) and
+`"experimental_mps_writes": true` to the same block.
+
 Then `sudo systemctl restart meat3d`, and use Overclock → **VRM voltage offsets**:
 
 - **Current reporting scale** (GFX): 1.2 means the firmware sees 1/1.2 of the real current, so the
   330 A limit acts like ~396 A. Go up 0.05 at a time and watch the VRM temperature. meat3 still shows
   the real amps. The regulator's own over-current protection is also raised by the same factor.
 - **Voltage offset** (GFX): adds real voltage on top of the firmware's 1.2 V ceiling. Go 5 mV at a time.
-- **Load line**: lower means less voltage sag under load.
+- **Load line**: lower means less voltage sag under load. Not available on MPS controllers.
 - **Restore factory settings** puts all three back, and so does a full power-off.
 
 The safer alternative for current: `sudo meat3-skutable --tdc-gfx 380 --write`. This asks the

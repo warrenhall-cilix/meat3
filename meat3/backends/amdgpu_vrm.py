@@ -20,6 +20,17 @@ Two more writable settings, behind the same switch:
     over-current protection by k. meat3 multiplies its displayed current and power back by k.
 "Real power" = max(12 V input VIN*IIN summed over controllers, corrected rail output power / 0.9):
 both are measured at the regulators, so they stay right when the board-power shunts are bypassed.
+
+Vendor profiles. RX 9070 XT boards use MPS MP2686A controllers (SkatterBencher; ElmorLabs EVC2
+drives them with its MP2857 profile), which are not plain PMBus:
+  * "generic": standard PMBus encodings (e.g. Infineon XDPE).
+  * "mps": per the Linux mp2856/mp2857 driver, VIN/IIN/IOUT/TEMP/POUT are LINEAR11, but READ_VOUT is
+    vendor-coded (10 bits; 1/256 V or 5 mV VID per MFR_VR_CONFIG2 0x5E bit 11) and VOUT_MODE is not
+    meaningful. VOUT_OFFSET (0x23) is an 8-bit signed step count whose step size differs between MPS
+    parts (6.25 mV on MP2886A, 5 mV reported on RDNA4), so offset writes need amdgpu_vrm.mps_offset_lsb_mv
+    set after verifying it on the card. VOUT_DROOP (0x28) is not the load line on MPS (MFR_IDROOP_CTRL
+    0x1E is), so no load-line control. IOUT_CAL_GAIN (0x38) is LINEAR11 as on MP2886A; current-scale
+    writes additionally need amdgpu_vrm.experimental_mps_writes.
 """
 from __future__ import annotations
 
@@ -39,6 +50,7 @@ SMBUS_BYTE_DATA, SMBUS_WORD_DATA, SMBUS_BLOCK_DATA = 2, 3, 5
 PAGE, VOUT_MODE, VOUT_CAL_OFFSET, VOUT_DROOP, IOUT_CAL_GAIN = 0x00, 0x20, 0x23, 0x28, 0x38
 READ_VIN, READ_IIN, READ_VOUT, READ_IOUT, READ_TEMP1, READ_POUT = 0x88, 0x89, 0x8B, 0x8C, 0x8D, 0x96
 PMBUS_REVISION, MFR_ID, MFR_MODEL = 0x98, 0x99, 0x9A
+MPS_MFR_VR_CONFIG2, MPS_VOUT_LINEAR = 0x5E, 1 << 11
 
 RAILS = {  # (address, page) -> (key, label)
     (0x22, 0): ("vgfx", "VDD_GFX (GPU core)"),
@@ -156,9 +168,25 @@ def find_adapters(pci_dir: str) -> list[tuple[int, str]]:
     return out
 
 
+def detect_profile(mfr: str, model: str) -> str:
+    m = f"{mfr} {model}".upper()
+    return "mps" if ("MPS" in m or model.upper().startswith("MP2")) else "generic"
+
+
+def mps_vout(raw: int, cfg2: Optional[int]) -> Optional[float]:
+    """READ_VOUT on MPS multiphase controllers (Linux mp2856.c): 10-bit, linear 1/256 V or VR13 VID."""
+    v = raw & 0x3FF
+    if cfg2 is None:
+        return None
+    if cfg2 & MPS_VOUT_LINEAR:
+        return v / 256.0
+    return (v + 49) * 0.005 if v else 0.0
+
+
 class Controller:
-    def __init__(self, bus_no: int, addr: int, mfr: str, model: str, rev: int):
+    def __init__(self, bus_no: int, addr: int, mfr: str, model: str, rev: int, profile: str = "generic"):
         self.bus_no, self.addr, self.mfr, self.model, self.rev = bus_no, addr, mfr, model, rev
+        self.profile = profile
         self.pages = sorted(p for a, p in RAILS if a == addr)
         self.mode: dict[int, int] = {}
 
@@ -176,6 +204,9 @@ class VrmAccess:
         self.allow_writes = bool(cfg.get("allow_writes", False))
         self.max_offset_mv = float(cfg.get("max_offset_mv", 50))
         self.max_current_scale = float(cfg.get("max_current_scale", 1.5))
+        self.profile_override = cfg.get("profile", "auto")
+        self.mps_lsb_mv = cfg.get("mps_offset_lsb_mv")            # None until verified on the card
+        self.mps_experimental = bool(cfg.get("experimental_mps_writes", False))
         self.buses: dict[int, object] = {}
         self.controllers: list[Controller] = []
         self.error: Optional[str] = None
@@ -216,7 +247,9 @@ class VrmAccess:
                     model = bus.read_block(addr, MFR_MODEL).decode(errors="replace").strip("\x00 ")
                 except OSError:
                     pass
-                self.controllers.append(Controller(bus_no, addr, mfr, model, rev))
+                prof = self.profile_override if self.profile_override in ("mps", "generic") else \
+                    detect_profile(mfr, model)
+                self.controllers.append(Controller(bus_no, addr, mfr, model, rev, prof))
         if not self.controllers:
             self.error = "no PMBus VRM controller answered at 0x22/0x24/0x26"
         self._load_factory()
@@ -254,12 +287,21 @@ class VrmAccess:
                 r: dict = {}
                 try:
                     bus.write_byte(c.addr, PAGE, page)
-                    mode = bus.read_byte(c.addr, VOUT_MODE)
-                    c.mode[page] = mode
-                    e = vout_exp(mode)
                     vraw = bus.read_word(c.addr, READ_VOUT)
-                    r["vout"] = vraw * 2.0 ** e if e is not None else None
                     r["vout_raw"] = vraw
+                    if c.profile == "mps":
+                        try:
+                            cfg2 = bus.read_word(c.addr, MPS_MFR_VR_CONFIG2)
+                        except OSError:
+                            cfg2 = None
+                        r["vout"] = mps_vout(vraw, cfg2)
+                        e = None
+                        c.mode[page] = 0xFF            # VOUT_MODE not meaningful on MPS
+                    else:
+                        mode = bus.read_byte(c.addr, VOUT_MODE)
+                        c.mode[page] = mode
+                        e = vout_exp(mode)
+                        r["vout"] = vraw * 2.0 ** e if e is not None else None
                     r["iout"] = linear11(bus.read_word(c.addr, READ_IOUT))
                     r["temp"] = linear11(bus.read_word(c.addr, READ_TEMP1))
                     r["pout"] = linear11(bus.read_word(c.addr, READ_POUT))
@@ -268,9 +310,16 @@ class VrmAccess:
                         r["iin"] = linear11(bus.read_word(c.addr, READ_IIN))
                     off = bus.read_word(c.addr, VOUT_CAL_OFFSET)
                     r["offset_raw"] = off
-                    r["offset_mv"] = (off - 0x10000 if off & 0x8000 else off) * 2.0 ** e * 1000 if e is not None else None
+                    if c.profile == "mps":
+                        steps = (off & 0xFF) - 0x100 if off & 0x80 else off & 0xFF
+                        r["offset_steps"] = steps
+                        r["offset_mv"] = steps * float(self.mps_lsb_mv) if self.mps_lsb_mv else None
+                    else:
+                        r["offset_mv"] = (off - 0x10000 if off & 0x8000 else off) * 2.0 ** e * 1000 if e is not None else None
                     r["factory_raw"] = self._factory(c, page, "", off)
-                    for cmd, name in ((IOUT_CAL_GAIN, "gain"), (VOUT_DROOP, "droop")):
+                    extra = ((IOUT_CAL_GAIN, "gain"),) if c.profile == "mps" else \
+                        ((IOUT_CAL_GAIN, "gain"), (VOUT_DROOP, "droop"))
+                    for cmd, name in extra:
                         try:
                             raw = bus.read_word(c.addr, cmd)
                         except OSError:
@@ -310,12 +359,24 @@ class VrmAccess:
         return {"input_w": in_w, "rails_w": rails_w, "real_w": max(cand) if cand else None}
 
     # -------------------------------------------------------------- writes
-    def can_write(self, addr: int, page: int, need_linear_vout: bool = True) -> tuple[bool, str]:
+    def can_write(self, addr: int, page: int, need_linear_vout: bool = True, what: str = "offset") -> tuple[bool, str]:
         if not self.allow_writes:
             return False, "VRM writes are disabled (set amdgpu_vrm.allow_writes in /etc/meat3/config.json)"
         c = next((c for c in self.controllers if c.addr == addr), None)
         if c is None or page not in c.pages:
             return False, "controller not found"
+        if c.profile == "mps":
+            if what == "offset":
+                if not self.mps_lsb_mv:
+                    return False, ("MPS controller: VOUT_OFFSET step size not verified on this card "
+                                   "(set amdgpu_vrm.mps_offset_lsb_mv once confirmed, e.g. 5 or 6.25)")
+                return True, ""
+            if what == "llc":
+                return False, "MPS controller: load line is a vendor register (MFR_IDROOP_CTRL), not supported"
+            if not self.mps_experimental:
+                return False, ("MPS controller: current-sense gain writes need "
+                               "amdgpu_vrm.experimental_mps_writes (encoding verified only on MP2886A)")
+            return True, ""
         if need_linear_vout and vout_exp(c.mode.get(page, 0xFF)) is None:
             return False, (f"controller uses non-linear VOUT_MODE 0x{c.mode.get(page, 0):02x}; "
                            "offset encoding unknown, refusing to write")
@@ -328,13 +389,20 @@ class VrmAccess:
         if abs(mv) > self.max_offset_mv:
             return False, f"|offset| > amdgpu_vrm.max_offset_mv ({self.max_offset_mv:g} mV)"
         c = next(c for c in self.controllers if c.addr == addr)
+        if c.profile == "mps":
+            lsb = float(self.mps_lsb_mv)
+            steps = int(round(mv / lsb))
+            if not -128 <= steps <= 127:
+                return False, "offset out of the 8-bit range"
+            raw = (self.factory.get(self._key(c, page), 0) & 0xFF00) | (steps & 0xFF)
+            return self._write_offset(c, page, raw, f"{steps:+d} steps x {lsb:g} mV")
         e = vout_exp(c.mode[page])
         raw = int(round(mv / 1000 / 2.0 ** e)) & 0xFFFF
         return self._write_offset(c, page, raw, f"{mv:+.1f} mV")
 
     def set_current_scale(self, addr: int, page: int, k: float) -> tuple[bool, str]:
         """Under-report current by k (raises the firmware's effective current limit k times)."""
-        ok, why = self.can_write(addr, page, need_linear_vout=False)
+        ok, why = self.can_write(addr, page, need_linear_vout=False, what="gain")
         if not ok:
             return False, why
         if not 1.0 <= k <= self.max_current_scale:
@@ -347,7 +415,7 @@ class VrmAccess:
         return self._write_word(c, page, IOUT_CAL_GAIN, raw, f"IOUT_CAL_GAIN x{k:.2f}")
 
     def set_droop_mohm(self, addr: int, page: int, mohm: float) -> tuple[bool, str]:
-        ok, why = self.can_write(addr, page, need_linear_vout=False)
+        ok, why = self.can_write(addr, page, need_linear_vout=False, what="llc")
         if not ok:
             return False, why
         c = next(c for c in self.controllers if c.addr == addr)
@@ -359,11 +427,12 @@ class VrmAccess:
         return self._write_word(c, page, VOUT_DROOP, to_linear11(mohm, l11_exp(fac)), f"VOUT_DROOP {mohm:.3f} mOhm")
 
     def reset(self, addr: int, page: int) -> tuple[bool, str]:
-        """Restore factory offset, current-sense gain and load line."""
-        ok, why = self.can_write(addr, page, need_linear_vout=False)
-        if not ok:
-            return False, why
-        c = next(c for c in self.controllers if c.addr == addr)
+        """Restore factory offset, current-sense gain and load line (whatever was ever read)."""
+        if not self.allow_writes:
+            return False, "VRM writes are disabled (set amdgpu_vrm.allow_writes in /etc/meat3/config.json)"
+        c = next((c for c in self.controllers if c.addr == addr), None)
+        if c is None or page not in c.pages:
+            return False, "controller not found"
         msgs = []
         for suffix, cmd in (("", VOUT_CAL_OFFSET), ("/gain", IOUT_CAL_GAIN), ("/droop", VOUT_DROOP)):
             raw = self.factory.get(self._key(c, page) + suffix)

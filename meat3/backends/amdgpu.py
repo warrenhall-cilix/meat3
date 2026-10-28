@@ -960,8 +960,13 @@ class AmdGpuBackend(Backend):
             if "vin" in r:
                 out.append(Sensor(f"{P}.vrm.{key}.vin", G, f"{label} input voltage", r.get("vin"), "V", 2, h + " READ_VIN"))
                 out.append(Sensor(f"{P}.vrm.{key}.iin", G, f"{label} input current", r.get("iin"), "A", 1, h + " READ_IIN"))
-            out.append(Sensor(f"{P}.vrm.{key}.offset", G, f"{label} voltage offset", r.get("offset_mv"), "mV", 1,
-                              h + f" VOUT_CAL_OFFSET raw 0x{r['offset_raw']:04x}, factory 0x{r['factory_raw']:04x}"))
+            steps = r.get("offset_steps")
+            out.append(Sensor(f"{P}.vrm.{key}.offset", G,
+                              f"{label} voltage offset" + (f" ({steps:+d} steps)" if steps is not None else ""),
+                              r.get("offset_mv"), "mV", 1,
+                              h + f" VOUT_CAL_OFFSET raw 0x{r['offset_raw']:04x}, factory 0x{r['factory_raw']:04x}" +
+                              (" (MPS: step size not verified; mV shown once amdgpu_vrm.mps_offset_lsb_mv is set)"
+                               if steps is not None and r.get("offset_mv") is None else "")))
         return out
 
     def _vrm_controls(self) -> list[Control]:
@@ -970,23 +975,29 @@ class AmdGpuBackend(Backend):
             return []
         P, G = self.prefix, f"{self.name}/VRM voltage offsets (PMBus)"
         out = []
+        G2 = G
         data = v.last or v.read_all()
         warn = ("DANGEROUS: writes the VRM controller's VOUT_CAL_OFFSET directly, outside the driver and "
                 "firmware limits. Positive values raise real voltage and heat; RDNA4 firmware partly "
                 "compensates because VID is inside its control loop. Volatile: a power cycle restores it.")
         for (addr, page), r in sorted(data.items()):
             key, label = vrmm.RAILS[(addr, page)]
-            ok, why = v.can_write(addr, page)
+            ok, why = v.can_write(addr, page, what="offset")
             fac = r.get("factory_raw")
             c = next(c for c in v.controllers if c.addr == addr)
-            e = vrmm.vout_exp(c.mode.get(page, 0xFF))
-            fac_mv = None if fac is None or e is None else (fac - 0x10000 if fac & 0x8000 else fac) * 2.0 ** e * 1000
+            if c.profile == "mps":
+                fs = None if fac is None else ((fac & 0xFF) - 0x100 if fac & 0x80 else fac & 0xFF)
+                fac_mv = None if fs is None or not v.mps_lsb_mv else fs * float(v.mps_lsb_mv)
+            else:
+                e = vrmm.vout_exp(c.mode.get(page, 0xFF))
+                fac_mv = None if fac is None or e is None else (fac - 0x10000 if fac & 0x8000 else fac) * 2.0 ** e * 1000
             out.append(Control(f"{P}.vrm.{key}.offset", G, f"{label} offset", "int",
                                None if r.get("offset_mv") is None else round(r["offset_mv"]),
                                min=-v.max_offset_mv, max=v.max_offset_mv, step=5, unit="mV",
                                default=None if fac_mv is None else round(fac_mv), danger=2, available=ok,
                                hint=(why + ". " if why else "") + warn))
-            okw, whyw = v.can_write(addr, page, need_linear_vout=False)
+            okw, whyw = v.can_write(addr, page, need_linear_vout=False, what="gain")
+            okl, whyl = v.can_write(addr, page, need_linear_vout=False, what="llc")
             if "gain_mohm" in r:
                 out.append(Control(f"{P}.vrm.{key}.current_scale", G, f"{label} current reporting scale", "float",
                                    round(r.get("scale", 1.0), 2), min=1.0, max=v.max_current_scale, step=0.05,
@@ -1000,13 +1011,14 @@ class AmdGpuBackend(Backend):
                 fd = vrmm.linear11(r["droop_factory_raw"])
                 out.append(Control(f"{P}.vrm.{key}.llc", G, f"{label} load line (LLC)", "float",
                                    round(r["droop_mohm"], 3), min=0.0, max=round(2 * fd, 3), step=round(max(fd / 10, 0.001), 3),
-                                   unit="mΩ", default=round(fd, 3), danger=2, available=okw,
-                                   hint=(whyw + ". " if whyw else "") +
+                                   unit="mΩ", default=round(fd, 3), danger=2, available=okl,
+                                   hint=(whyl + ". " if whyl else "") +
                                    "VOUT_DROOP. Lower = less voltage drop under load (higher real voltage at "
                                    "full current, bigger overshoot on load release). 0 = flat. Volatile."))
-            out.append(Control(f"{P}.vrm.{key}.reset", G, f"{label}: restore factory settings", "action",
-                               danger=1, available=okw,
-                               hint=whyw or "writes back the offset, current-sense gain and load line found first"))
+            out.append(Control(f"{P}.vrm.{key}.reset", G2, f"{label}: restore factory settings", "action",
+                               danger=1, available=v.allow_writes,
+                               hint="writes back the offset, current-sense gain and load line found first" if
+                               v.allow_writes else "VRM writes are disabled (amdgpu_vrm.allow_writes)"))
         return out
 
     def _vrm_apply(self, control_id: str, value: Any) -> tuple[bool, str]:

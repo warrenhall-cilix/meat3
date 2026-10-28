@@ -134,6 +134,14 @@ a 7.3 kernel with a non-RDNA4 GPU.
     firmware's current limit (TDC 330 A GFX / 88 A SoC on every 9070 XT) effectively becomes ×k. The
     regulator's own over-current protection moves with it. meat3 corrects its own current and power
     readings, including the hidden firmware metrics. Capped by `max_current_scale` (1.5).
+  - **MPS controllers** (the MP2686A used on RX 9070 XT boards) don't use plain PMBus encodings.
+    meat3 detects them and decodes their voltage the way Linux's MP2857 driver does. The other
+    readings are standard. MPS writes have extra locks:
+    - The voltage offset shows raw steps until `"mps_offset_lsb_mv"` is set (5 or 6.25, verified on
+      the card).
+    - The current scale needs `"experimental_mps_writes": true`.
+    - Load line isn't offered (MPS uses a vendor register for it).
+    `tools/collect_amdgpu.sh` dumps the registers needed to verify these.
 - **`meat3-gputune`**: automatic undervolt finder. It steps the GFX voltage offset down 10 mV at a
   time while you run a demanding game or benchmark (or `--load CMD`). A step only counts while the
   GPU is ≥85% busy, and fails on any amdgpu timeout, reset or page fault in the kernel log. It's
