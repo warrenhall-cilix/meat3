@@ -369,6 +369,14 @@ class OsdPage(QWidget):
         i = self.mh_owner.findData(st.value("mangohud/owner", "mangohud"))
         self.mh_owner.setCurrentIndex(max(0, i))
         g.addWidget(self.mh_owner, 2, 1, 1, 2)
+        g.addWidget(QLabel("In-game size"), 3, 0, Qt.AlignRight)
+        self.mh_size = QSpinBox()
+        self.mh_size.setRange(12, 64)
+        self.mh_size.setSuffix(" px")
+        self.mh_size.setValue(int(st.value("mangohud/font_size", 28)))
+        self.mh_size.setToolTip("MangoHud font size in game. Changing it rewrites the config; MangoHud reloads it live.")
+        self.mh_size.valueChanged.connect(lambda _: self.generate_mangohud(quiet=True))
+        g.addWidget(self.mh_size, 3, 1)
         opts = QHBoxLayout()
         self.mh_fps = QCheckBox("Include MangoHud FPS")
         self.mh_fps.setChecked(setting_bool(st, "mangohud/fps", True))
@@ -388,13 +396,13 @@ class OsdPage(QWidget):
         self.btn_gen.setObjectName("primary")
         self.btn_gen.clicked.connect(lambda: self.generate_mangohud())
         opts.addWidget(self.btn_gen)
-        g.addLayout(opts, 3, 0, 1, 3)
+        g.addLayout(opts, 4, 0, 1, 3)
         self.mh_usage = QLabel()
         self.mh_usage.setObjectName("dim")
         self.mh_usage.setWordWrap(True)
         self.mh_usage.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.mh_usage.setFont(mono_font(-1))
-        g.addWidget(self.mh_usage, 4, 0, 1, 3)
+        g.addWidget(self.mh_usage, 5, 0, 1, 3)
         g.setColumnStretch(1, 1)
         self._update_usage()
         self.mh_path.textChanged.connect(lambda _: self._update_usage())
@@ -589,7 +597,7 @@ class OsdPage(QWidget):
         corner = self.style_.corner
         try:
             text = mangohud.generate(sens, hotkey=self.link.osd.get("hotkey", ""), osd_file=self.osd_file(),
-                                     position=corner, font_size=max(14, int(self.style_.font_size * 1.6)),
+                                     position=corner, font_size=self.mh_size.value(),
                                      include_fps=self.mh_fps.isChecked(),
                                      hotkey_owner=self.mh_owner.currentData(),
                                      start_hidden=mangohud.global_enabled() or self.mh_global.isChecked()
@@ -603,6 +611,7 @@ class OsdPage(QWidget):
         st.setValue("mangohud/osd_file", self.mh_osd.text().strip())
         st.setValue("mangohud/owner", self.mh_owner.currentData())
         st.setValue("mangohud/fps", self.mh_fps.isChecked())
+        st.setValue("mangohud/font_size", self.mh_size.value())
         st.setValue("mangohud/auto", self.mh_auto.isChecked())
         self._update_usage()
         if not quiet:

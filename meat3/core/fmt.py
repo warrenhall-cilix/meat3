@@ -54,5 +54,5 @@ def osd_label(sensor: dict) -> str:
 
 
 def osd_line(sensor: dict) -> str:
-    """One line of /run/meat3/osd.txt: '<label>: <value unit>'."""
+    """One line of osd.txt (/run/meat3 and /tmp/meat3): '<label>: <value unit>'."""
     return f"{osd_label(sensor)}: {format_value(sensor.get('value'), sensor.get('decimals', 0), sensor.get('unit', ''))}"

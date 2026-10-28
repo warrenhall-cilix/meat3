@@ -8,7 +8,7 @@ meat3d (root daemon)  ── sensors + OC backends ── /run/meat3/meat3.sock 
         │                                                                  ├─ Sensors tree (HWiNFO-style)
         ├─ hotkey (Right Ctrl + F12, evdev)                                ├─ Cores tab (per-core table)
         │                                                                  ├─ Overclock tab
-        └─ /run/meat3/osd.txt ── MangoHud (in-game OSD)                    └─ OSD tab + desktop overlay
+        └─ /tmp/meat3/osd.txt ── MangoHud (in-game OSD)                    └─ OSD tab + desktop overlay
 ```
 
 ## Install (Arch / CachyOS; Debian/Fedora best-effort)

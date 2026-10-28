@@ -12,7 +12,7 @@ src/shell.cpp, src/config.cpp, src/notify.cpp):
   line of output after a fixed 50 ms sleep. Polls happen on MangoHud's hw-info thread every
   `fps_sampling_period` (default 500 ms), not on the render thread.
 * So the cheapest possible exec is pure shell builtins (no fork/exec at all): we `read` the
-  N-th line of /run/meat3/osd.txt with `IFS=: read` and print the value part.
+  N-th line of /tmp/meat3/osd.txt with `IFS=: read` and print the value part.
   Cost: one open()+read() per line per poll, plus MangoHud's own 50 ms wait per exec item
   (sequential, on the hw thread) - keep the OSD to <= ~8 items so updates stay < 0.5 s.
 * MangoHud's config parser drops everything after '#', so neither the command nor the labels
@@ -29,7 +29,7 @@ from typing import Iterable, Optional
 
 from meat3.core.fmt import osd_label
 
-DEFAULT_OSD_FILE = "/run/meat3/osd.txt"
+DEFAULT_OSD_FILE = "/tmp/meat3/osd.txt"        # /run isn't visible inside Steam's game container; /tmp is
 
 # evdev KEY_* names (what the daemon reads) -> X keysym names (what MangoHud's toggle_hud parses)
 _EVDEV_KEYSYM = {

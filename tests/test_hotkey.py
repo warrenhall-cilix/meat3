@@ -67,3 +67,33 @@ class TestHotkey(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOsdFiles(unittest.TestCase):
+    def test_safe_tmp_dir(self):
+        from meat3.daemon import meat3d as D
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "meat3")
+            self.assertTrue(D._safe_tmp_dir(p))                 # created, ours, 0755
+            self.assertTrue(D._safe_tmp_dir(p))                 # already there: still fine
+            os.chmod(p, 0o777)
+            self.assertFalse(D._safe_tmp_dir(p))                # writable by others: refuse
+            os.rmdir(p)
+            os.symlink(d, p)
+            self.assertFalse(D._safe_tmp_dir(p))                # a symlink: refuse
+
+    def test_values_written_even_when_osd_off(self):
+        from meat3.daemon import meat3d as D
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(D, "OSD_TXT", os.path.join(d, "run.txt")), \
+                mock.patch.object(D, "OSD_TMP_DIR", os.path.join(d, "tmpd")), \
+                mock.patch.object(D, "OSD_TXT_GAME", os.path.join(d, "tmpd", "osd.txt")), \
+                mock.patch.object(D, "_safe_tmp_dir", lambda: D.__dict__["os"].makedirs(os.path.join(d, "tmpd"), exist_ok=True) or True):
+            st = D.State.__new__(D.State)
+            st.osd = {"enabled": False, "items": ["a"]}
+            st.sensors = [{"id": "a", "label": "GPU clock", "value": 3000, "unit": "MHz", "decimals": 0,
+                           "group": "GPU/Clocks"}]
+            st.write_osd()
+            for f in ("run.txt", "tmpd/osd.txt"):
+                txt = open(os.path.join(d, f)).read()
+                self.assertIn("3000 MHz", txt, f)

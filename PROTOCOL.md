@@ -25,7 +25,7 @@ Framing: one JSON object per line, in both directions. Every request gets exactl
 
 ## OSD
 
-The daemon keeps the OSD state and writes the selected sensors as text lines to `/run/meat3/osd.txt` every poll:
+The daemon keeps the OSD state and writes the selected sensors as text lines to `/run/meat3/osd.txt` every poll, and a copy to `/tmp/meat3/osd.txt`; Steam's game container can see `/tmp` but not `/run`. The values are written even while the OSD is off, because MangoHud keeps its own shown/hidden state:
 
 - **In-game:** the generated MangoHud config reads that file.
 - **Desktop:** the GUI's overlay window reads the socket.

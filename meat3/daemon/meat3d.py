@@ -33,6 +33,29 @@ from ..core.model import Backend
 VERSION = "0.1"
 RUN_DIR = "/run/meat3"
 OSD_TXT = os.path.join(RUN_DIR, "osd.txt")
+# Steam runs games in a container (pressure-vessel) that can't see /run/meat3 but shares the host's
+# /tmp, so MangoHud reads this copy. The directory is root-owned so no user can plant a symlink.
+OSD_TMP_DIR = "/tmp/meat3"
+OSD_TXT_GAME = os.path.join(OSD_TMP_DIR, "osd.txt")
+
+
+def _safe_tmp_dir(path: str = OSD_TMP_DIR) -> bool:
+    """Create /tmp/meat3 as root 0755, or accept it only if it's already root-owned and not writable by others."""
+    try:
+        os.mkdir(path, 0o755)
+    except FileExistsError:
+        pass
+    except OSError:
+        return False
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    import stat as _st
+    if not _st.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid() or st.st_mode & 0o022:
+        print(f"meat3d: {path} isn't a root-owned private directory; not writing the in-game OSD copy")
+        return False
+    return True
 WRITE_GROUP = "meat3"
 
 
@@ -157,23 +180,29 @@ class State:
             self.controls, self.ctl_owner = ctls, owner
 
     def write_osd(self):
-        if not self.osd.get("enabled"):
-            text = ""
-        else:
-            by_id = {s["id"]: s for s in self.sensors}
-            lines = []
-            for sid in self.osd.get("items", []):          # exactly one line per item, in order
-                s = by_id.get(sid)
-                lines.append(fmt.osd_line(s) if s else f"{sid}: —")
-            text = "\n".join(lines) + ("\n" if lines else "")
-        tmp = OSD_TXT + ".tmp"
-        try:
-            with open(tmp, "w") as f:
-                f.write(text)
-            os.chmod(tmp, 0o644)
-            os.replace(tmp, OSD_TXT)
-        except OSError:
-            pass
+        # Always the values, even with the OSD "off": MangoHud keeps its own shown/hidden state (its
+        # toggle_hud), and a blank file would leave an empty HUD whenever the two disagree.
+        by_id = {s["id"]: s for s in self.sensors}
+        lines = []
+        for sid in self.osd.get("items", []):          # exactly one line per item, in order
+            s = by_id.get(sid)
+            lines.append(fmt.osd_line(s) if s else f"{sid}: —")
+        text = "\n".join(lines) + ("\n" if lines else "")
+        targets = [OSD_TXT]
+        if getattr(self, "_tmp_ok", None) is None:
+            self._tmp_ok = _safe_tmp_dir()
+        if self._tmp_ok:
+            targets.append(OSD_TXT_GAME)
+        for path in targets:
+            tmp = path + ".tmp"
+            try:
+                with open(tmp, "w") as f:
+                    f.write(text)
+                os.chmod(tmp, 0o644)
+                os.replace(tmp, path)
+            except OSError:
+                if path == OSD_TXT_GAME:
+                    self._tmp_ok = None          # /tmp cleaned up under us: re-check next poll
 
     def save_osd(self):
         cfg = config.get()
@@ -255,7 +284,7 @@ class Handler(socketserver.StreamRequestHandler):
         if cmd == "osd_get":
             with st.lock:
                 return {"ok": True, "enabled": bool(st.osd.get("enabled")), "items": list(st.osd.get("items", [])),
-                        "hotkey": "+".join(st.osd.get("hotkey", [])), "file": OSD_TXT}
+                        "hotkey": "+".join(st.osd.get("hotkey", [])), "file": OSD_TXT_GAME}
         if cmd == "update_status":
             up = self.updater
             if not up.checking and time.time() - up.state["checked"] > UPDATE_EVERY:
