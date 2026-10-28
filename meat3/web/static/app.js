@@ -21,7 +21,7 @@ const S = {
   pins: store.get("pins", []),
   shut: new Set(store.get("shut", [])),
   win: store.get("win", 600),
-  ovKey: "", ovEls: {}, rowEls: {}, graphs: {},
+  ovKey: "", ovEls: {}, rowEls: {}, graphs: {}, hoverT: null,
 };
 
 // same rules as meat3/core/fmt.py format_value
@@ -288,10 +288,48 @@ function makeGraph(id) {
   const now = el("span", "now num");
   const x = el("button", "x", "✕"); x.title = "Remove graph"; x.onclick = () => pin(id);
   head.append(title, now, x);
+  const plot = el("div", "plot");
   const canvas = el("canvas");
+  const tip = el("div", "tip num"); tip.hidden = true;
+  plot.append(canvas, tip);
   const stats = el("div", "stats num");
-  card.append(head, canvas, stats);
-  return { id, card, canvas, now, stats, t: [], y: [] };
+  card.append(head, plot, stats);
+  const g = { id, card, canvas, tip, now, stats, t: [], y: [], geo: null };
+  // hover (mouse) or drag (finger): crosshair, dot and value at that moment, on every graph at once
+  const at = (ev) => {
+    if (!g.geo) return;
+    const r = canvas.getBoundingClientRect(), { padL, pw, tStart } = g.geo;
+    const x = Math.min(Math.max(ev.clientX - r.left, padL), padL + pw);
+    setHover(tStart + ((x - padL) / pw) * S.win);
+  };
+  canvas.addEventListener("pointermove", at);
+  canvas.addEventListener("pointerdown", at);
+  canvas.addEventListener("pointerleave", (ev) => { if (ev.pointerType === "mouse") setHover(null); });
+  return g;
+}
+
+function setHover(t) {
+  S.hoverT = t;
+  Object.values(S.graphs).forEach(draw);
+}
+
+// index of the non-empty sample nearest to time t (g.t is sorted)
+function nearest(g, t) {
+  let lo = 0, hi = g.t.length - 1;
+  if (hi < 0) return -1;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (g.t[mid] < t) lo = mid + 1; else hi = mid; }
+  if (lo > 0 && Math.abs(g.t[lo - 1] - t) < Math.abs(g.t[lo] - t)) lo--;
+  for (let d = 0; d < 5; d++) {          // step over a gap of a few missing readings
+    if (g.y[lo + d] != null) return lo + d;
+    if (g.y[lo - d] != null) return lo - d;
+  }
+  return -1;
+}
+
+function ago(sec) {
+  sec = Math.round(sec);
+  if (sec < 1) return "now";
+  return sec < 60 ? sec + " s ago" : Math.floor(sec / 60) + " min " + (sec % 60 ? (sec % 60) + " s " : "") + "ago";
 }
 
 function appendGraphs(t) {
@@ -366,6 +404,31 @@ function draw(g) {
     pen = true;
   }
   ctx.stroke();
+
+  g.geo = { padL, pw, tStart };
+  const k = S.hoverT == null || S.hoverT < tStart ? -1 : nearest(g, S.hoverT);
+  if (k < 0 || g.t[k] < tStart) { g.tip.hidden = true; return; }
+  const px = X(g.t[k]), py = Y(g.y[k]);
+  ctx.strokeStyle = css("--dim");
+  ctx.lineWidth = 1;
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath(); ctx.moveTo(Math.round(px) + 0.5, padT); ctx.lineTo(Math.round(px) + 0.5, padT + ph); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.beginPath(); ctx.arc(px, py, 4.5, 0, 2 * Math.PI);
+  ctx.fillStyle = css("--accent"); ctx.fill();
+  ctx.lineWidth = 2; ctx.strokeStyle = css("--card"); ctx.stroke();
+  const when = new Date(g.t[k] * 1000);
+  g.tip.textContent = "";
+  g.tip.append(el("b", null, sensorFmt(id, g.y[k])),
+               el("span", null, when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) +
+                                " · " + ago(tEnd - g.t[k])));
+  g.tip.hidden = false;
+  const tw = g.tip.offsetWidth, th = g.tip.offsetHeight;
+  let left = px + 10, top = py - th - 8;
+  if (left + tw > w) left = px - tw - 10;              // flip to the left near the right edge
+  if (top < 0) top = py + 10;
+  g.tip.style.left = Math.max(0, left) + "px";
+  g.tip.style.top = Math.min(top, h - th) + "px";
 }
 
 // ---------------------------------------------------------------- views
@@ -391,6 +454,8 @@ function init() {
   if (!win.value) { win.value = "600"; S.win = 600; }
   win.onchange = () => { S.win = Number(win.value); store.set("win", S.win); syncGraphs(true); };
   $("#clear-pins").onclick = () => { S.pins = []; store.set("pins", []); syncGraphs(false); updateTable(); };
+  // phones: a tap outside the graphs clears the crosshair
+  document.addEventListener("pointerdown", (ev) => { if (S.hoverT != null && !ev.target.closest(".plot")) setHover(null); });
   window.addEventListener("resize", () => { if (S.view === "graphs") Object.values(S.graphs).forEach(draw); });
   show(["overview", "sensors", "graphs"].includes(S.view) ? S.view : "overview");
   poll();
