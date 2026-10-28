@@ -14,7 +14,7 @@ meat3d (root daemon)  ── sensors + OC backends ── /run/meat3/meat3.sock 
 ## Install (Arch / CachyOS; Debian/Fedora best-effort)
 
 ```sh
-git clone <this repo> meat3 && cd meat3
+git clone https://github.com/warrenhall-cilix/meat3.git && cd meat3
 ./packaging/install.sh          # installs deps, /opt/meat3, meat3d.service, adds you to group 'meat3'
 # log out/in once, then:
 meat3
