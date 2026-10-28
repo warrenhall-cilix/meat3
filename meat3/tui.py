@@ -127,6 +127,65 @@ def prefix_kind(prefix: str) -> str:
     return "other"
 
 
+def overview_devices(order: list[str], sensors: dict) -> list[tuple[str, str]]:
+    """(prefix, title) per device, GPUs first. Shared by the TUI and the web UI."""
+    seen, out = set(), []
+    for sid in order:
+        p = sid.split(".", 1)[0]
+        if p not in seen:
+            seen.add(p)
+            out.append((p, sensors[sid].get("group", p).split("/")[0]))
+    rank = {"nv": 0, "amdgpu": 1, "cpu": 2, "other": 3}
+    return sorted(out, key=lambda d: rank[prefix_kind(d[0])])
+
+
+def overview_rows(p: str, order: list[str], sensors: dict) -> list[tuple]:
+    """Headline rows of one device: (label, sensor, bar max) or ('pins'/'cores', [sensors], None)."""
+    kind = prefix_kind(p)
+    rows = []
+    if kind in HEADLINES:
+        for rx, label, bmax in HEADLINES[kind]:
+            for sid in order:
+                if sid.startswith(p + ".") and re.search(rx, sid[len(p) + 1:]):
+                    s = sensors[sid]
+                    if s.get("value") is None:
+                        continue
+                    mx = None
+                    if isinstance(bmax, (int, float)):
+                        mx = bmax
+                    elif isinstance(bmax, str):
+                        if bmax == "@pwr.limit_real":
+                            lim, raw = sensors.get(f"{p}.pwr.limit"), sensors.get(f"{p}.pwr.board")
+                            if lim and raw and lim.get("value") and raw.get("value"):
+                                mx = lim["value"] * s["value"] / raw["value"]
+                        else:
+                            o = sensors.get(f"{p}.{bmax[1:]}")
+                            mx = o.get("value") if o else None
+                    lab = label
+                    m = re.search(r"(ccd|ccx|fan)(\d+)", sid)
+                    if m and sum(1 for x in order if x.startswith(p + ".") and re.search(rx, x[len(p) + 1:])) > 1:
+                        lab = f"{label} {m.group(2)}"
+                    rows.append((lab, s, mx))
+        if kind == "nv":
+            pins = [sensors.get(f"{p}.pin{k}.a") for k in range(1, 7)]
+            if any(x and x.get("value") is not None for x in pins):
+                rows.append(("pins", pins, None))
+        if kind == "cpu":
+            cores = sorted({int(m.group(1)) for sid in order
+                            for m in [re.match(rf"{p}\.core(\d+)\.clk_eff$", sid)] if m})
+            if cores:
+                rows.append(("cores", [sensors.get(f"{p}.core{k}.clk_eff") for k in cores], None))
+    else:
+        for sid in order:
+            s = sensors[sid]
+            if sid.startswith(p + ".") and s.get("unit") in ("°C", "RPM") and s.get("value") \
+                    and (s["unit"] != "°C" or -20 < s["value"] < 150):     # skip unconnected probes
+                rows.append((s["label"][:16], s, 100 if s["unit"] == "°C" else None))
+            if len(rows) >= 8:
+                break
+    return rows
+
+
 # ----------------------------------------------------------------------------- UI
 
 
@@ -329,59 +388,10 @@ class Tui:
 
     # ---- view 1: overview
     def _devices(self) -> list[tuple[str, str]]:
-        seen, out = set(), []
-        for sid in self.order:
-            p = sid.split(".", 1)[0]
-            if p not in seen:
-                seen.add(p)
-                out.append((p, self.sensors[sid].get("group", p).split("/")[0]))
-        rank = {"nv": 0, "amdgpu": 1, "cpu": 2, "other": 3}
-        return sorted(out, key=lambda d: rank[prefix_kind(d[0])])
+        return overview_devices(self.order, self.sensors)
 
     def _panel_rows(self, p: str) -> list[tuple]:
-        kind = prefix_kind(p)
-        rows = []
-        if kind in HEADLINES:
-            for rx, label, bmax in HEADLINES[kind]:
-                for sid in self.order:
-                    if sid.startswith(p + ".") and re.search(rx, sid[len(p) + 1:]):
-                        s = self.sensors[sid]
-                        if s.get("value") is None:
-                            continue
-                        mx = None
-                        if isinstance(bmax, (int, float)):
-                            mx = bmax
-                        elif isinstance(bmax, str):
-                            if bmax == "@pwr.limit_real":
-                                lim, raw = self.sensors.get(f"{p}.pwr.limit"), self.sensors.get(f"{p}.pwr.board")
-                                if lim and raw and lim.get("value") and raw.get("value"):
-                                    mx = lim["value"] * s["value"] / raw["value"]
-                            else:
-                                o = self.sensors.get(f"{p}.{bmax[1:]}")
-                                mx = o.get("value") if o else None
-                        lab = label
-                        m = re.search(r"(ccd|ccx|fan)(\d+)", sid)
-                        if m and sum(1 for x in self.order if x.startswith(p + ".") and re.search(rx, x[len(p) + 1:])) > 1:
-                            lab = f"{label} {m.group(2)}"
-                        rows.append((lab, s, mx))
-            if kind == "nv":
-                pins = [self.sensors.get(f"{p}.pin{k}.a") for k in range(1, 7)]
-                if any(x and x.get("value") is not None for x in pins):
-                    rows.append(("pins", pins, None))
-            if kind == "cpu":
-                cores = sorted({int(m.group(1)) for sid in self.order
-                                for m in [re.match(rf"{p}\.core(\d+)\.clk_eff$", sid)] if m})
-                if cores:
-                    rows.append(("cores", [self.sensors.get(f"{p}.core{k}.clk_eff") for k in cores], None))
-        else:
-            for sid in self.order:
-                s = self.sensors[sid]
-                if sid.startswith(p + ".") and s.get("unit") in ("°C", "RPM") and s.get("value") \
-                        and (s["unit"] != "°C" or -20 < s["value"] < 150):     # skip unconnected probes
-                    rows.append((s["label"][:16], s, 100 if s["unit"] == "°C" else None))
-                if len(rows) >= 8:
-                    break
-        return rows
+        return overview_rows(p, self.order, self.sensors)
 
     def draw_overview(self, top, height):
         h, w = self.scr.getmaxyx()

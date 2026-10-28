@@ -1,0 +1,29 @@
+[Unit]
+Description=meat³ web UI (read-only sensor view, port 8733)
+After=meat3d.service network-online.target
+Wants=meat3d.service
+
+[Service]
+Type=simple
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/local/bin/meat3-web
+Restart=on-failure
+RestartSec=3
+# Throwaway user: may read the daemon socket and the token (group meat3) but isn't a member the
+# daemon trusts for writes, so even a bug here couldn't change clocks or fans.
+DynamicUser=yes
+SupplementaryGroups=meat3
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

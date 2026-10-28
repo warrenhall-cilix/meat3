@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>meat³</title>
+<link rel="icon" href="/icon.svg">
+<link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<header>
+  <div class="brand"><img src="/icon.svg" alt="" width="22" height="22"> meat³ <span id="host"></span></div>
+  <nav id="tabs">
+    <button data-view="overview" class="on">Overview</button>
+    <button data-view="sensors">Sensors</button>
+    <button data-view="graphs">Graphs <span id="pin-count"></span></button>
+  </nav>
+  <div class="status"><span id="conn" class="dot"></span><span id="status-text">connecting…</span>
+    <a id="logout" href="/logout" hidden>Log out</a></div>
+</header>
+<main>
+  <section id="view-overview" class="view on"><div id="cards" class="cards"></div>
+    <p class="note">Click a row to graph it.</p></section>
+  <section id="view-sensors" class="view">
+    <div class="toolbar">
+      <input id="filter" type="search" placeholder="Filter sensors (name, group or id)" autocomplete="off">
+      <button id="expand">Expand all</button><button id="collapse">Collapse all</button>
+    </div>
+    <table id="sensors"><thead><tr><th class="pin"></th><th>Sensor</th><th>Current</th><th>Min</th><th>Max</th><th>Average</th></tr></thead></table>
+  </section>
+  <section id="view-graphs" class="view">
+    <div class="toolbar">
+      <label>Window <select id="window">
+        <option value="60">1 min</option><option value="300">5 min</option>
+        <option value="600" selected>10 min</option><option value="900">15 min</option>
+      </select></label>
+      <button id="clear-pins">Remove all graphs</button>
+    </div>
+    <div id="graphs" class="graphs"></div>
+    <p id="graphs-empty" class="note">No graphs yet. Click ☆ next to a sensor, or a row in the Overview.</p>
+  </section>
+</main>
+<footer><span id="version"></span> · read-only view · min/max/avg are kept by the daemon since it started</footer>
+</body>
+</html>

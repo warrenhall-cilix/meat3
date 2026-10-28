@@ -20,6 +20,7 @@ git clone https://github.com/warrenhall-cilix/meat3.git && cd meat3
 meat3
 ```
 Uninstall: `./packaging/install.sh --uninstall`. Config: `/etc/meat3/config.json`.
+Server or Proxmox host without a desktop: `./packaging/install.sh --headless --web`. See [Web UI](#web-ui-optional-read-only).
 
 **Updating:** Help → *Check for updates…* in the GUI, or `u` in `meat3-tui`. A "⬆ N updates available"
 button also appears in the status bar. Or from a terminal: `~/meat3/packaging/update.sh`.
@@ -130,6 +131,31 @@ meat3-tui            # same daemon, in a terminal (works over SSH)
 ```
 Views: **1 Overview** (dashboard panels with bars, per-pin current and per-core clocks), **2 Sensors** (everything, with min/max/avg; `/` to filter), **3 Cores** (per-core table and L3 by app), **4 Overclock** (select a control and press Enter to set it; dangerous settings require typing `yes`).
 Keys: `Tab` cycles views, `o` toggles the OSD, `r` resets stats, `u` checks for and installs updates, `q` quits. Uses only Python's built-in curses.
+
+## Web UI (optional, read-only)
+
+A browser view for headless machines such as Proxmox hosts and servers, or for checking your PC from a phone. It has three tabs:
+- **Overview**: the same dashboard as the TUI.
+- **Sensors**: every sensor with min/max/avg, filterable.
+- **Graphs**: pin any sensor, with up to 15 minutes of history.
+
+It **cannot change anything**: it has no overclocking, fan, OSD or update controls. The service runs as a throwaway system user that the daemon doesn't accept writes from.
+
+```sh
+./packaging/install.sh --web                 # desktop PC: also start the web UI on port 8733
+./packaging/install.sh --headless --web      # server/Proxmox (as root is fine): no Qt/MangoHud, web UI on
+meat3-web --url                              # print the login link (token is in /etc/meat3/web.token)
+sudo systemctl disable --now meat3-web       # turn it off again
+```
+- **Login:** open the printed link once per browser. It sets a cookie for 30 days. To log everyone out, delete `/etc/meat3/web.token`, run `sudo meat3-web --gen-token`, then `sudo systemctl restart meat3-web`.
+- **Settings:** in `/etc/meat3/config.json` under `"web"`:
+  - `listen` (default `"0.0.0.0"`, or `"127.0.0.1"` for SSH tunnels only)
+  - `port` (`8733`)
+  - `history_s` (`900`)
+  - `cert`/`key` (PEM paths to serve HTTPS)
+  - `auth` (`false` only behind your own authenticating proxy)
+- **Security:** plain HTTP sends the token unencrypted, which is fine on a home LAN. Over anything else, use `cert`/`key`, a reverse proxy, or `ssh -L 8733:localhost:8733 host`.
+- **Headless installs:** use `meat3-tui` over SSH for everything else. Debian/Proxmox needs `apt install git` first to clone.
 
 ## RX 9070 / 9070 XT (RDNA4) extras
 
