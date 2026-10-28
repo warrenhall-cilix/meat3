@@ -403,6 +403,21 @@ def _exercise(app, w, tmp, sock, osd_file, mock):
     assert not theme().glass
     w.tabs.setCurrentIndex(0)
 
+    # --- hotkey picker: typed combo -> daemon -> label
+    from meat3.gui.osd import HotkeyDialog, pretty_hotkey
+    hd = HotkeyDialog("KEY_RIGHTCTRL+KEY_F12")
+    hd._typed("leftalt+o")
+    assert hd.keys == ["KEY_LEFTALT", "KEY_O"] and hd.ok.isEnabled()
+    assert "Alt_L+o" in hd.err.text()
+    hd._typed("leftalt")
+    assert not hd.ok.isEnabled()
+    assert pretty_hotkey("KEY_RIGHTCTRL+KEY_F12") == "Right Ctrl + F12"
+    got = {}
+    w.link.request({"cmd": "osd_set", "hotkey": ["KEY_LEFTALT", "KEY_O"]}, lambda r: got.setdefault("r", r))
+    _wait(app, lambda: "r" in got, 5, "osd_set hotkey")
+    assert got["r"]["ok"], got
+    _wait(app, lambda: "Left Alt + O" in w.osd.hotkey_lbl.text(), 5, "hotkey label follows daemon")
+
     # --- updates: status-bar button and dialog (mockd reports 2 new commits)
     w._poll_updates()
     _wait(app, lambda: w.upd_btn.isVisible(), 5, "update button")

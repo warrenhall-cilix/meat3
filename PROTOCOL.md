@@ -13,7 +13,7 @@ Framing: one JSON object per line, in both directions. Every request gets exactl
 | `{"cmd":"apply","id":"<control id>","value":<v>}` | `{"ok":bool,"msg":"..."}` |
 | `{"cmd":"reset_stats"}` | `{"ok":true}` (clears min/max/avg) |
 | `{"cmd":"osd_get"}` | `{"ok":true,"enabled":bool,"items":["sensor id",...],"hotkey":"KEY_RIGHTCTRL+KEY_F12"}` |
-| `{"cmd":"osd_set","enabled":bool?,"items":[...]?}` | `{"ok":true}` |
+| `{"cmd":"osd_set","enabled":bool?,"items":[...]?,"hotkey":"RIGHTCTRL+F12" or ["KEY_…",...]?}` | `{"ok":true}`; a new hotkey is live at once (1–4 keys, last one not a modifier) |
 | `{"cmd":"osd_toggle"}` | `{"ok":true,"enabled":bool}` |
 | `{"cmd":"update_status"}` | `{"ok":true,"installed":"<git describe>","behind":int\|null,"commits":["<hash> <subject>",...],"checking":bool,"running":bool,"log":[lines],"error":"...","can_update":bool}`. Starts a background GitHub check if the last one is over 6 h old. |
 | `{"cmd":"update_check"}` | `{"ok":true}`; fetches in the background, poll `update_status` |

@@ -27,6 +27,7 @@ import traceback
 from .. import backends as backends_pkg
 from ..core import config, fmt
 from ..core.updater import Updater
+from ..osd.mangohud import parse_hotkey
 from ..core.model import Backend
 
 VERSION = "0.1"
@@ -290,6 +291,14 @@ class Handler(socketserver.StreamRequestHandler):
                     st.osd["enabled"] = bool(req["enabled"])
                 if "items" in req:
                     st.osd["items"] = [str(x) for x in req["items"]]
+            if "hotkey" in req:
+                try:
+                    keys = parse_hotkey(req["hotkey"])
+                except ValueError as e:
+                    return {"ok": False, "msg": f"hotkey: {e}"}
+                with st.lock:
+                    st.osd["hotkey"] = keys
+                print(f"meat3d: hotkey -> {'+'.join(keys)}")
             st.save_osd(); st.write_osd()
             return {"ok": True}
         if cmd == "osd_toggle":
@@ -310,14 +319,27 @@ def hotkey_thread(state: State):
         print("meat3d: python-evdev missing; hotkey disabled")
         return
     import selectors
-    combo = state.osd.get("hotkey", ["KEY_RIGHTCTRL", "KEY_F12"])
-    codes = [ecodes.ecodes[k] for k in combo if k in ecodes.ecodes]
-    if not codes:
-        return
     sel = selectors.DefaultSelector()
     devs = {}
+    combo, codes = None, []
+
+    def arm():
+        """(Re)read the combo from state; the GUI/TUI can change it at runtime (osd_set hotkey)."""
+        nonlocal combo, codes
+        combo = list(state.osd.get("hotkey") or ["KEY_RIGHTCTRL", "KEY_F12"])
+        codes = [ecodes.ecodes[k] for k in combo if k in ecodes.ecodes]
+        for d in list(devs.values()):
+            try:
+                sel.unregister(d)
+                d.close()
+            except (KeyError, ValueError, OSError):
+                pass
+        devs.clear()
+        down.clear()
 
     def scan():
+        if not codes:
+            return
         for path in evdev.list_devices():
             if path in devs:
                 continue
@@ -330,12 +352,18 @@ def hotkey_thread(state: State):
             except OSError:
                 pass
 
+    down = set()
+    arm()
     scan()
     print(f"meat3d: hotkey {'+'.join(combo)} on {len(devs)} keyboard(s)")
-    down = set()
     last_scan = time.time()
     while True:
-        for key, _ in sel.select(timeout=5):
+        if list(state.osd.get("hotkey") or []) != combo:
+            arm()
+            scan()
+            last_scan = time.time()
+            print(f"meat3d: hotkey now {'+'.join(combo)} on {len(devs)} keyboard(s)")
+        for key, _ in sel.select(timeout=1):
             d = key.fileobj
             try:
                 for ev in d.read():
@@ -343,7 +371,7 @@ def hotkey_thread(state: State):
                         continue
                     if ev.value == 1:
                         down.add(ev.code)
-                        if ev.code == codes[-1] and all(c in down for c in codes):
+                        if codes and ev.code == codes[-1] and all(c in down for c in codes):
                             state.toggle_osd()
                     elif ev.value == 0:
                         down.discard(ev.code)

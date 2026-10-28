@@ -773,6 +773,12 @@ class MockDaemon:
                     if not isinstance(items, list) or not all(isinstance(i, str) for i in items):
                         return {"ok": False, "msg": "items must be a list of sensor ids"}
                     self.osd_items = list(dict.fromkeys(items))
+                if "hotkey" in req:
+                    from meat3.osd.mangohud import parse_hotkey
+                    try:
+                        self.hotkey = "+".join(parse_hotkey(req["hotkey"]))
+                    except ValueError as e:
+                        return {"ok": False, "msg": f"hotkey: {e}"}
             self.write_osd()
             return {"ok": True}
         if cmd == "osd_toggle":

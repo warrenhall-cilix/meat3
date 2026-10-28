@@ -68,6 +68,51 @@ def evdev_to_keysym(hotkey: str) -> Optional[str]:
     return "+".join(out) if out else None
 
 
+MODIFIERS = {"KEY_LEFTCTRL", "KEY_RIGHTCTRL", "KEY_LEFTSHIFT", "KEY_RIGHTSHIFT", "KEY_LEFTALT", "KEY_RIGHTALT",
+             "KEY_LEFTMETA", "KEY_RIGHTMETA"}
+
+
+def parse_hotkey(value) -> list[str]:
+    """'rightctrl+F12', 'KEY_RIGHTCTRL+KEY_F12' or a list -> ['KEY_RIGHTCTRL', 'KEY_F12'].
+
+    1-4 keys, the last one not a modifier, and every key one MangoHud can also bind (so the daemon's
+    hotkey and MangoHud's toggle_hud stay the same combo). Raises ValueError with a readable reason."""
+    parts = value if isinstance(value, (list, tuple)) else str(value or "").split("+")
+    keys = []
+    for p in parts:
+        k = str(p).strip().upper().replace(" ", "")
+        if not k:
+            continue
+        k = k if k.startswith("KEY_") else "KEY_" + k
+        if evdev_to_keysym(k) is None:
+            raise ValueError(f"unsupported key {k[4:]!r}")
+        if k not in keys:
+            keys.append(k)
+    if not 1 <= len(keys) <= 4:
+        raise ValueError("use 1 to 4 keys, e.g. RIGHTCTRL+F12")
+    if keys[-1] in MODIFIERS:
+        raise ValueError("end the combo with a normal key, e.g. RIGHTCTRL+F12")
+    return [k for k in keys[:-1] if k in MODIFIERS] + [k for k in keys[:-1] if k not in MODIFIERS] + keys[-1:]
+
+
+def set_toggle_key(path: str, hotkey: str) -> bool:
+    """Point an existing meat3-generated config's toggle_hud at a new hotkey. False if the file
+    doesn't exist or doesn't use toggle_hud (the 'daemon toggles MangoHud' mode needs no change)."""
+    ks = evdev_to_keysym(hotkey)
+    try:
+        with open(path) as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return False
+    hit = False
+    for i, ln in enumerate(lines):
+        if ln.startswith("toggle_hud="):
+            lines[i], hit = f"toggle_hud={ks}", True
+    if hit and ks:
+        write_config(path, "\n".join(lines) + "\n")
+    return hit and bool(ks)
+
+
 def exec_command(line_no: int, osd_file: str = DEFAULT_OSD_FILE) -> str:
     """Builtin-only /bin/sh command printing the value part of line `line_no` (1-based).
 

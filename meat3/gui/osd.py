@@ -7,7 +7,8 @@ from typing import Optional
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QGuiApplication, QIcon, QPainter,
                            QPainterPath, QPen, QPixmap)
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QColorDialog, QComboBox, QFileDialog,
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QColorDialog, QComboBox, QDialog,
+                               QDialogButtonBox, QFileDialog,
                                QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSlider, QSpinBox,
                                QStyle, QStyledItemDelegate, QStyleOptionViewItem, QTreeView, QVBoxLayout,
@@ -226,6 +227,10 @@ class OsdPage(QWidget):
         top.addSpacing(16)
         self.hotkey_lbl = QLabel("Hotkey: —")
         top.addWidget(self.hotkey_lbl)
+        self.btn_hotkey = QPushButton("Change…")
+        self.btn_hotkey.setToolTip("Pick a new OSD hotkey. It also becomes MangoHud's in-game toggle.")
+        self.btn_hotkey.clicked.connect(self.change_hotkey)
+        top.addWidget(self.btn_hotkey)
         top.addStretch(1)
         self.items_lbl = QLabel()
         self.items_lbl.setObjectName("dim")
@@ -399,7 +404,7 @@ class OsdPage(QWidget):
         self.chk_enabled.setChecked(en)
         hk = osd.get("hotkey") or "—"
         ks = mangohud.evdev_to_keysym(hk) if osd.get("hotkey") else None
-        self.hotkey_lbl.setText(f"Hotkey: <b>{hk.replace('KEY_', '').replace('+', ' + ')}</b>"
+        self.hotkey_lbl.setText(f"Hotkey: <b>{pretty_hotkey(hk)}</b>"
                                 + (f"  <span style='color:{theme().dim.name()}'>(MangoHud: {ks})</span>" if ks else ""))
         items = [i for i in osd.get("items") or [] if isinstance(i, str)]
         if self._inflight == 0 and items != self.items:
@@ -522,6 +527,25 @@ class OsdPage(QWidget):
         if p:
             self.mh_path.setText(p)
 
+    def change_hotkey(self):
+        dlg = HotkeyDialog(self.link.osd.get("hotkey", ""), self)
+        if dlg.exec() != QDialog.Accepted or not dlg.keys:
+            return
+        keys = dlg.keys
+
+        def done(r):
+            if not r.get("ok"):
+                self.status.emit(f"Hotkey not changed: {r.get('msg')}")
+                return
+            self.link.osd = dict(self.link.osd, hotkey="+".join(keys))
+            self.on_osd_state(self.link.osd)
+            path = os.path.expanduser(self.mh_path.text().strip() or str(config_dir() / "MangoHud.conf"))
+            note = ""
+            if os.path.exists(path) and self.generate_mangohud(quiet=True):
+                note = " MangoHud config updated; restart the game if it doesn't pick it up."
+            self.status.emit(f"Hotkey is now {pretty_hotkey('+'.join(keys))}.{note}")
+        self.link.request({"cmd": "osd_set", "hotkey": keys}, done)
+
     def _update_usage(self):
         path = os.path.expanduser(self.mh_path.text().strip() or str(config_dir() / "MangoHud.conf"))
         self.mh_usage.setText(f"Steam launch options:\nMANGOHUD_CONFIGFILE={path} mangohud %command%")
@@ -553,3 +577,102 @@ class OsdPage(QWidget):
         if not quiet:
             self.status.emit(f"Wrote MangoHud config with {len(sens)} items to {path}")
         return path
+
+
+def pretty_hotkey(hk: str) -> str:
+    """'KEY_RIGHTCTRL+KEY_F12' -> 'Right Ctrl + F12'."""
+    names = {"RIGHTCTRL": "Right Ctrl", "LEFTCTRL": "Left Ctrl", "RIGHTSHIFT": "Right Shift",
+             "LEFTSHIFT": "Left Shift", "RIGHTALT": "Right Alt", "LEFTALT": "Left Alt",
+             "LEFTMETA": "Left Super", "RIGHTMETA": "Right Super"}
+    parts = [p.replace("KEY_", "") for p in (hk or "").split("+") if p]
+    return " + ".join(names.get(p, p.title() if len(p) > 3 and not p[1:].isdigit() else p) for p in parts) or "—"
+
+
+def evdev_name(scancode: int) -> Optional[str]:
+    """X11/Wayland native scan code (evdev code + 8) -> 'KEY_…', keeping left/right modifiers apart."""
+    try:
+        from evdev import ecodes
+    except ImportError:
+        return None
+    n = ecodes.KEY.get(scancode - 8)
+    if isinstance(n, list):
+        n = n[0]
+    return n if isinstance(n, str) and n.startswith("KEY_") else None
+
+
+class HotkeyDialog(QDialog):
+    """Captures a key combo the way the daemon will see it (evdev names)."""
+
+    def __init__(self, current: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("OSD hotkey")
+        self.keys: list[str] = []
+        self.held: list[str] = []
+        v = QVBoxLayout(self)
+        v.addWidget(QLabel(f"Current: <b>{pretty_hotkey(current)}</b><br><br>"
+                           "Hold the modifier keys you want, then press the final key.<br>"
+                           "Or type it, e.g. <code>RIGHTCTRL+F12</code>."))
+        self.show_lbl = QLabel("<i>press a combo…</i>")
+        self.show_lbl.setAlignment(Qt.AlignCenter)
+        self.show_lbl.setMinimumHeight(48)
+        f = self.show_lbl.font()
+        f.setPointSizeF(f.pointSizeF() * 1.5)
+        self.show_lbl.setFont(f)
+        v.addWidget(self.show_lbl)
+        self.typed = QLineEdit()
+        self.typed.setPlaceholderText("or type: RIGHTCTRL+F12")
+        self.typed.textEdited.connect(self._typed)
+        v.addWidget(self.typed)
+        self.err = QLabel("")
+        self.err.setObjectName("dim")
+        v.addWidget(self.err)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        self.ok = bb.button(QDialogButtonBox.Ok)
+        self.ok.setEnabled(False)
+        for b in bb.buttons():              # keys must reach the dialog, not a focused button
+            b.setFocusPolicy(Qt.NoFocus)
+            b.setAutoDefault(False)
+        self.typed.setFocusPolicy(Qt.ClickFocus)
+        v.addWidget(bb)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setFocus()
+
+    def _set(self, keys):
+        try:
+            self.keys = mangohud.parse_hotkey(keys)
+            self.show_lbl.setText(f"<b>{pretty_hotkey('+'.join(self.keys))}</b>")
+            ks = mangohud.evdev_to_keysym("+".join(self.keys))
+            self.err.setText(f"MangoHud will use: {ks}")
+            self.ok.setEnabled(True)
+        except ValueError as e:
+            self.keys = []
+            self.err.setText(str(e))
+            self.ok.setEnabled(False)
+
+    def _typed(self, text):
+        self._set(text)
+
+    def keyPressEvent(self, e):
+        if self.typed.hasFocus():
+            return super().keyPressEvent(e)
+        if e.isAutoRepeat():
+            return
+        name = evdev_name(e.nativeScanCode())
+        if name is None:
+            self.err.setText("can't read that key here; type the combo instead")
+            return
+        if name in mangohud.MODIFIERS:
+            if name not in self.held:
+                self.held.append(name)
+            self.show_lbl.setText(pretty_hotkey("+".join(self.held)) + " + …")
+            return
+        self._set(self.held + [name])
+
+    def keyReleaseEvent(self, e):
+        if self.typed.hasFocus() or e.isAutoRepeat():
+            return super().keyReleaseEvent(e)
+        name = evdev_name(e.nativeScanCode())
+        if name in self.held:
+            self.held.remove(name)

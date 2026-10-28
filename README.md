@@ -191,6 +191,10 @@ tool is still untested on hardware.
 
 
 - Pick sensors in the **OSD** tab and toggle with **Right Ctrl + F12**. The hotkey works system-wide, including in fullscreen games, because the daemon reads the keyboard.
+- **Change the hotkey:** OSD tab → *Change…* (press the new combo), or `h` in `meat3-tui`. The daemon
+  switches immediately. meat3 also rewrites `toggle_hud` in its MangoHud config, so the same keys toggle
+  MangoHud in game; MangoHud reloads its config live. Use 1–4 keys ending in a normal key, e.g.
+  Left Alt + O.
 - **Desktop:** the GUI shows a click-through overlay.
 - **In-game:** launch games with MangoHud using meat³'s config, e.g. Steam launch options:
   `MANGOHUD_CONFIGFILE=$HOME/.config/meat3/MangoHud.conf mangohud %command%`

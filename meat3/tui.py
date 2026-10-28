@@ -238,6 +238,26 @@ class Tui:
             except (OSError, ValueError):
                 self.upd = {}
 
+    def hotkey_key(self):
+        try:
+            cur = self.c.call({"cmd": "osd_get"}).get("hotkey", "")
+            raw = self.prompt(f"OSD hotkey (now {cur.replace('KEY_', '')}), e.g. RIGHTCTRL+F12: ")
+            if not raw or not raw.strip():
+                return
+            r = self.c.call({"cmd": "osd_set", "hotkey": raw.strip()})
+            if not r.get("ok"):
+                self.flash(str(r.get("msg", "")))
+                return
+            from meat3.osd import mangohud
+            new = mangohud.parse_hotkey(raw.strip())
+            mh = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+                              "meat3", "MangoHud.conf")
+            same = mangohud.set_toggle_key(mh, "+".join(new))
+            self.flash(f"hotkey now {'+'.join(k[4:] for k in new)}"
+                       + ("; MangoHud config updated too (applies live)" if same else ""))
+        except (OSError, ValueError) as e:
+            self.flash(f"hotkey: {e}")
+
     def update_key(self):
         u = self.upd
         try:
@@ -287,7 +307,7 @@ class Tui:
                f"{time.strftime('%H:%M:%S')} "
         self.put(0, max(x, w - len(info)), info, self.cp["head"])
         body_h = h - 2
-        keys = {0: "Tab views  o OSD  r reset stats  u update  q quit",
+        keys = {0: "Tab views  o OSD  h hotkey  r reset stats  u update  q quit",
                 1: "↑↓ PgUp/PgDn scroll  / filter  Esc clear  o OSD  r reset  u update  q quit",
                 2: "↑↓ scroll  o OSD  r reset  u update  q quit",
                 3: "↑↓ select  Enter set value  o OSD  u update  q quit"}[self.view]
@@ -681,6 +701,8 @@ class Tui:
                 self.flash(str(e))
         elif ch == "u":
             self.update_key()
+        elif ch == "h":
+            self.hotkey_key()
         elif ch == "/" and v == 1:
             f = self.prompt("filter: ", self.filter)
             if f is not None:
