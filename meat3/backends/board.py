@@ -51,7 +51,7 @@ def _pretty_chip(name: str, hw: str) -> str:
     if name.startswith("r8169") or name.startswith("igc") or name.startswith("atlantic"):
         return f"Ethernet ({name})"
     if name.startswith("nct") or name.startswith("it8") or name.startswith("f71") or name.startswith("w83"):
-        return f"Super I/O {name.upper()}"
+        return f"Super I/O {name.split('_', 1)[0].upper()}"     # it8696_a008090a: drop Gigabyte's SIV id
     if name.endswith("_xhci"):
         return f"USB controller ({name})"
     if name == "acpitz":

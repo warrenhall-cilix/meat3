@@ -154,7 +154,9 @@ sudo systemctl daemon-reload
 sudo systemctl enable meat3d.service
 sudo systemctl restart meat3d.service     # restart, not just start: a running daemon keeps old code
 if [[ $WANT_WEB == 1 ]]; then sudo systemctl enable meat3-web.service; fi
-if systemctl is-enabled --quiet meat3-web.service 2>/dev/null; then sudo systemctl restart meat3-web.service; fi
+if systemctl is-enabled --quiet meat3-web.service 2>/dev/null || systemctl is-active --quiet meat3-web.service; then
+    sudo systemctl restart meat3-web.service      # also when started by hand: a running one keeps old code
+fi
 sleep 2
 systemctl --no-pager --lines=5 status meat3d.service || true
 echo

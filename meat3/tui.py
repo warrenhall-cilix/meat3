@@ -50,11 +50,12 @@ class Client:
             raise
 
     def close(self):
-        try:
-            if self.sock:
-                self.sock.close()
-        except OSError:
-            pass
+        for x in (self.f, self.sock):
+            try:
+                if x:
+                    x.close()          # file first: otherwise its finaliser flushes into a dead socket
+            except OSError:
+                pass
         self.sock = self.f = None
 
 
