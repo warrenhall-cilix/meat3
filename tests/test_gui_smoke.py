@@ -221,6 +221,21 @@ def _exercise(app, w, tmp, sock, osd_file, mock):
     _pump(app, 0.3)
     w.grab().save(str(SHOTS / "graphs-dark.png"))
     gp.set_hover(None)
+    # a preset from the menu replaces the graphs; "Restore previous graphs" brings the old layout back
+    before = [list(c.ids) for c in gp.cards]
+    gp.add_preset("Temperatures", replace=True)
+    assert gp.cards and all(c.unit() == "°C" for c in gp.cards), [c.ids for c in gp.cards]
+    assert len(gp.cards) == len(preset_ids("Temperatures", w.store.sensors))
+    assert gp.act_restore.isEnabled()
+    gp.add_preset("Power", replace=True)
+    assert all(c.unit() == "W" for c in gp.cards), [c.unit() for c in gp.cards]
+    gp.restore_previous()                                      # one step back: the Temperatures set
+    assert all(c.unit() == "°C" for c in gp.cards) and not gp.act_restore.isEnabled()
+    from meat3.gui.graphs import GraphCard
+    gp.clear()                                                 # put the earlier layout back for the rest
+    gp.cards += [GraphCard(gp, ids) for ids in before]
+    gp._after_change()
+    assert [list(c.ids) for c in gp.cards] == before
     import json as _json
     from meat3.gui.common import settings as _settings
     assert _json.loads(_settings().value("graphs/cards")) == [c.ids for c in gp.cards]

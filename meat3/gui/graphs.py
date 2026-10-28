@@ -524,8 +524,16 @@ class GraphsPage(QWidget):
         self.btn_presets.setText("Presets")
         self.btn_presets.setPopupMode(QToolButton.InstantPopup)
         pm = QMenu(self)
-        for name in list(PRESETS) + ["Temperatures", "Power"]:
-            pm.addAction(name, lambda n=name: self.add_preset(n))
+        names = list(PRESETS) + ["Temperatures", "Power"]
+        for name in names:                    # a preset replaces what's on screen ...
+            pm.addAction(name, lambda n=name: self.add_preset(n, replace=True))
+        pm.addSeparator()
+        am = pm.addMenu("Add to current")     # ... or adds to it
+        for name in names:
+            am.addAction(name, lambda n=name: self.add_preset(n, replace=False))
+        self.act_restore = pm.addAction("Restore previous graphs", self.restore_previous)
+        self.act_restore.setEnabled(False)
+        self._previous: Optional[list[list[str]]] = None
         self.btn_presets.setMenu(pm)
         bar.addWidget(self.btn_presets)
         bar.addSpacing(12)
@@ -620,12 +628,40 @@ class GraphsPage(QWidget):
                     self._drop(c)
         self._after_change()
 
-    def add_preset(self, name: str):
-        ids = [i for i in preset_ids(name, self.store.sensors) if i not in self.ids()]
+    def add_preset(self, name: str, replace: bool = False):
+        wanted = preset_ids(name, self.store.sensors)
+        if replace:
+            if not wanted:
+                self.status.emit(f"{name}: no matching sensors on this machine; graphs left as they were")
+                return
+            if self.cards:
+                self._previous = [list(c.ids) for c in self.cards]
+                self.act_restore.setEnabled(True)
+            for c in list(self.cards):
+                self._drop(c)
+        ids = [i for i in wanted if i not in self.ids()]
         for i in ids:
             self.cards.append(GraphCard(self, [i]))
         self._after_change()
-        self.status.emit(f"{name}: added {len(ids)} graph(s)" if ids else f"{name}: nothing new to add")
+        if replace:
+            self.status.emit(f"{name}: showing {len(ids)} graph(s)")
+        else:
+            self.status.emit(f"{name}: added {len(ids)} graph(s)" if ids else f"{name}: nothing new to add")
+
+    def restore_previous(self):
+        """Undo the last preset that replaced the graphs."""
+        prev, self._previous = self._previous, None
+        self.act_restore.setEnabled(False)
+        if prev is None:
+            return
+        for c in list(self.cards):
+            self._drop(c)
+        for ids in prev:
+            ids = [i for i in ids if i in self.store.sensors]
+            if ids:
+                self.cards.append(GraphCard(self, ids))
+        self._after_change()
+        self.status.emit(f"Restored {len(self.cards)} graph(s)")
 
     def remove_card(self, card: GraphCard):
         self._drop(card)
