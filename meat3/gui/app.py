@@ -17,8 +17,9 @@ from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QMainW
 from meat3.gui.client import DaemonLink, default_socket_path
 from meat3.gui.cores import CoresPage
 from meat3.gui.graphs import GraphsPage
-from meat3.gui.common import (THEMES, SensorStore, app_icon, apply_theme, install_none_refcount_guard,
-                              paint_backdrop, setting_bool, settings, theme, theme_name)
+from meat3.gui.common import (THEMES, KdeSchemeWatcher, SensorStore, app_icon, apply_theme,
+                              install_none_refcount_guard, paint_backdrop, setting_bool, settings, theme,
+                              theme_name)
 from meat3.gui.osd import OsdPage, OsdStyle, OverlayWindow
 from meat3.gui.overlay_proc import OverlayProxy, want_separate_process
 from meat3.gui.overclock import OverclockPage
@@ -140,6 +141,9 @@ class MainWindow(QMainWindow):
 
         self._build_menu(dark)
         self._build_tray()
+        # "System" theme: follow Plasma colour scheme / accent / widget style changes live
+        self.kde_watch = KdeSchemeWatcher(self)
+        self.kde_watch.changed.connect(lambda: self.set_theme("system") if theme().native else None)
         self.resize(1180, 820)
         st = settings()
         geo = st.value("window/geometry")
@@ -392,7 +396,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--light", action="store_true", help="start with the light theme")
     g.add_argument("--dark", action="store_true", help="start with the dark theme")
-    g.add_argument("--theme", choices=list(THEMES), help="dark, light or liquid (Liquid Ass)")
+    g.add_argument("--theme", choices=list(THEMES), help="dark, light, liquid (Liquid Ass) or system (follow KDE)")
     ap.add_argument("--hidden", action="store_true", help="start minimised to the tray")
     args, qt_args = ap.parse_known_args(argv)
     QApplication.setApplicationName("meat3")

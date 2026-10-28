@@ -123,7 +123,16 @@ Every control is range-checked by the daemon. Only root or members of group `mea
 
 ## Themes
 
-View → Theme: **Dark**, **Light** or **Liquid Ass**, a Liquid Glass-style theme. Liquid Ass layers translucent glass panels over a painted liquid backdrop, with specular rims, a top-lit sheen, and pill-shaped tabs and buttons. Start with a specific theme using `meat3 --theme liquid`.
+View → Theme: **Dark**, **Light**, **Liquid Ass** (a Liquid Glass-style theme) or **System (follow KDE)**.
+
+**System (follow KDE)** uses your Plasma setup:
+- the widget style (Breeze, or whatever you've chosen);
+- the colour scheme and accent colour, from `~/.config/kdeglobals`;
+- KDE's own warning red, amber and green for the sensor colour cues.
+
+Change the colour scheme or accent in System Settings and meat³ follows straight away, no restart. Outside KDE it uses the desktop's default Qt palette.
+
+Liquid Ass layers translucent glass panels over a painted liquid backdrop, with specular rims, a top-lit sheen, and pill-shaped tabs and buttons. Start with a specific theme using `meat3 --theme liquid` (or `--theme system`).
 
 ## TUI
 

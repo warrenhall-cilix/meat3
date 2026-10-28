@@ -1,6 +1,7 @@
 """Shared GUI state: config paths, settings, theme, colour rules, sensor store, icons."""
 from __future__ import annotations
 
+import configparser
 import csv
 import sys
 import math
@@ -10,10 +11,10 @@ from collections import deque
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QObject, QPointF, QRectF, QSettings, Qt, Signal
+from PySide6.QtCore import QFileSystemWatcher, QObject, QPointF, QRectF, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import (QColor, QFont, QFontDatabase, QIcon, QPainter, QPainterPath,
                            QPalette, QPen, QPixmap, QPolygonF)
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QStyleFactory
 
 ASSETS = Path(__file__).resolve().parent / "assets"
 
@@ -48,7 +49,7 @@ def setting_bool(s: QSettings, key: str, default: bool) -> bool:
 
 # ----------------------------------------------------------------------------- theme
 
-THEMES = {"dark": "Dark", "light": "Light", "liquid": "Liquid Ass"}
+THEMES = {"dark": "Dark", "light": "Light", "liquid": "Liquid Ass", "system": "System (follow KDE)"}
 
 
 def theme_name(v) -> str:
@@ -58,7 +59,70 @@ def theme_name(v) -> str:
     v = str(v or "dark").lower().replace(" ", "")
     if v in ("liquidass", "liquidglass", "glass"):
         return "liquid"
+    if v in ("kde", "auto", "native", "plasma"):
+        return "system"
     return v if v in THEMES else "dark"
+
+
+# ----------------------------------------------------------------------------- KDE / system colours
+def kdeglobals_path() -> Path:
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    return Path(base) / "kdeglobals"
+
+
+def read_kde_scheme(path: Optional[Path] = None) -> Optional[dict]:
+    """Plasma's colour scheme and widget style from kdeglobals, or None outside KDE.
+    Plasma writes the active scheme (with the accent colour already applied) into this file."""
+    path = path or kdeglobals_path()
+    cp = configparser.ConfigParser(interpolation=None, strict=False)
+    cp.optionxform = str
+    try:
+        if not cp.read(path, encoding="utf-8"):
+            return None
+    except (configparser.Error, OSError, UnicodeDecodeError):
+        return None
+
+    def col(sec: str, key: str) -> Optional[QColor]:
+        try:
+            parts = [int(x) for x in cp.get(sec, key).split(",")]
+        except (configparser.Error, ValueError):
+            return None
+        if len(parts) not in (3, 4) or not all(0 <= x <= 255 for x in parts):
+            return None
+        return QColor(*parts)
+
+    if col("Colors:Window", "BackgroundNormal") is None:
+        return None
+    out = {"style": cp.get("KDE", "widgetStyle", fallback="") or ""}
+    for name, sec, key in (
+            ("window", "Colors:Window", "BackgroundNormal"), ("window_text", "Colors:Window", "ForegroundNormal"),
+            ("base", "Colors:View", "BackgroundNormal"), ("alt", "Colors:View", "BackgroundAlternate"),
+            ("text", "Colors:View", "ForegroundNormal"), ("dim", "Colors:View", "ForegroundInactive"),
+            ("button", "Colors:Button", "BackgroundNormal"), ("button_text", "Colors:Button", "ForegroundNormal"),
+            ("selection", "Colors:Selection", "BackgroundNormal"),
+            ("selection_text", "Colors:Selection", "ForegroundNormal"),
+            ("tooltip", "Colors:Tooltip", "BackgroundNormal"), ("tooltip_text", "Colors:Tooltip", "ForegroundNormal"),
+            ("link", "Colors:View", "ForegroundLink"), ("negative", "Colors:View", "ForegroundNegative"),
+            ("neutral", "Colors:View", "ForegroundNeutral"), ("positive", "Colors:View", "ForegroundPositive"),
+            ("accent", "General", "AccentColor")):
+        out[name] = col(sec, key)
+    return out
+
+
+def _mix(a: QColor, b: QColor, t: float) -> QColor:
+    """a blended towards b by t (0..1)."""
+    return QColor(round(a.red() + (b.red() - a.red()) * t), round(a.green() + (b.green() - a.green()) * t),
+                  round(a.blue() + (b.blue() - a.blue()) * t))
+
+
+# the platform's own style and palette, captured before the first theme replaces them
+_NATIVE: dict = {}
+
+
+def _capture_native(app) -> None:
+    if not _NATIVE:
+        _NATIVE["style"] = app.style().name()
+        _NATIVE["palette"] = QPalette(app.palette())
 
 
 def _rgba(c: QColor) -> str:
@@ -69,8 +133,13 @@ class Theme:
     def __init__(self, name="dark"):
         self.name = theme_name(name)
         self.glass = self.name == "liquid"
+        self.native = self.name == "system"
         dark = self.name != "light"
         self.dark = dark
+        self.style = "Fusion"
+        if self.native:
+            self._from_system()
+            return
         if self.glass:
             # "Liquid Ass": translucent glass over a painted liquid backdrop (paint_backdrop)
             self.window = QColor("#16131f")          # opaque: popups / fallbacks
@@ -124,7 +193,46 @@ class Theme:
             self.throttle_bg = QColor(229, 57, 53, 38)
             self.modified_bg = QColor(201, 71, 47, 26)
 
+    def _from_system(self):
+        """Colours from the KDE colour scheme (kdeglobals), else from the platform palette; the
+        widget style is the desktop's own (Breeze on Plasma) so meat3 looks like every other app."""
+        k = read_kde_scheme() or {}
+        nat = _NATIVE.get("palette") or QApplication.palette()
+        role = lambda r: QColor(nat.color(QPalette.Active, r))
+        pick = lambda key, r: k.get(key) or role(r)
+        # a partial scheme: derive what's missing from the scheme's own window/text colours, not
+        # from the platform palette (which may be the opposite brightness)
+        self.window = pick("window", QPalette.Window)
+        self.window_text = k.get("window_text") or (k.get("text") if k else None) or role(QPalette.WindowText)
+        self.base = k.get("base") or (self.window if k else role(QPalette.Base))
+        self.text = k.get("text") or (self.window_text if k else role(QPalette.Text))
+        self.alt = k.get("alt") or (_mix(self.base, self.text, 0.04) if k else role(QPalette.AlternateBase))
+        self.dim = k.get("dim") or _mix(self.text, self.base, 0.45)
+        self.button = k.get("button") or (self.window if k else role(QPalette.Button))
+        self.button_text = k.get("button_text") or (self.window_text if k else role(QPalette.ButtonText))
+        self.highlight = pick("selection", QPalette.Highlight)
+        self.highlight_text = pick("selection_text", QPalette.HighlightedText)
+        self.tooltip = k.get("tooltip") or (self.window if k else role(QPalette.ToolTipBase))
+        self.tooltip_text = k.get("tooltip_text") or (self.window_text if k else role(QPalette.ToolTipText))
+        self.link = pick("link", QPalette.Link)
+        self.accent = k.get("accent") or self.highlight
+        self.dark = self.window.lightness() < 128
+        self.border = _mix(self.window, self.text, 0.18)
+        self.select = _mix(self.base, self.highlight, 0.35)       # selection tint behind normal text
+        self.device_bg = _mix(self.base, self.text, 0.06)
+        self.card = self.base
+        self.red = k.get("negative") or QColor("#da4453" if self.dark else "#c62828")
+        self.amber = k.get("neutral") or QColor("#f67400" if self.dark else "#b26b00")
+        self.green = k.get("positive") or QColor("#27ae60" if self.dark else "#23853f")
+        self.throttle_bg = QColor(self.red.red(), self.red.green(), self.red.blue(), 46)
+        self.modified_bg = QColor(self.accent.red(), self.accent.green(), self.accent.blue(), 30)
+        want = k.get("style") or _NATIVE.get("style") or ""
+        keys = {x.lower(): x for x in QStyleFactory.keys()}
+        self.style = keys.get(want.lower()) or keys.get((_NATIVE.get("style") or "").lower()) or "Fusion"
+
     def palette(self) -> QPalette:
+        if self.native:
+            return self._system_palette()
         p = QPalette()
         for grp in (QPalette.Active, QPalette.Inactive):
             p.setColor(grp, QPalette.Window, self.window)
@@ -152,7 +260,45 @@ class Theme:
         p.setColor(QPalette.Disabled, QPalette.Highlight, self.border)
         return p
 
+    def _system_palette(self) -> QPalette:
+        p = QPalette()
+        for grp in (QPalette.Active, QPalette.Inactive):
+            for r, c in ((QPalette.Window, self.window), (QPalette.WindowText, self.window_text),
+                         (QPalette.Base, self.base), (QPalette.AlternateBase, self.alt), (QPalette.Text, self.text),
+                         (QPalette.Button, self.button), (QPalette.ButtonText, self.button_text),
+                         (QPalette.Highlight, self.highlight), (QPalette.HighlightedText, self.highlight_text),
+                         (QPalette.ToolTipBase, self.tooltip), (QPalette.ToolTipText, self.tooltip_text),
+                         (QPalette.PlaceholderText, self.dim), (QPalette.Link, self.link),
+                         (QPalette.Light, self.button.lighter(130)), (QPalette.Midlight, self.button.lighter(115)),
+                         (QPalette.Mid, self.border), (QPalette.Dark, self.button.darker(150)),
+                         (QPalette.Shadow, QColor(0, 0, 0)), (QPalette.BrightText, self.red)):
+                p.setColor(grp, r, c)
+            if hasattr(QPalette, "Accent"):                      # Qt 6.6+
+                p.setColor(grp, QPalette.Accent, self.accent)
+        for r in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText):
+            p.setColor(QPalette.Disabled, r, self.dim)
+        for r in (QPalette.Window, QPalette.Base, QPalette.Button, QPalette.AlternateBase):
+            p.setColor(QPalette.Disabled, r, p.color(QPalette.Active, r))
+        p.setColor(QPalette.Disabled, QPalette.Highlight, self.border)
+        return p
+
+    def system_stylesheet(self) -> str:
+        """Only meat3's own widgets (cards, banners, dim labels): everything else is drawn by the
+        desktop's style, which a stylesheet on standard widgets would switch off."""
+        c = {k: v.name() for k, v in vars(self).items() if isinstance(v, QColor)}
+        return f"""
+QFrame#card {{ border: 1px solid {c['border']}; border-radius: 6px; background: {c['card']}; }}
+QLabel#cardTitle {{ font-weight: bold; }}
+QFrame#banner {{ background: {QColor(self.red.red(), self.red.green(), self.red.blue(), 40).name(QColor.HexArgb)};
+    border: 1px solid {c['red']}; border-radius: 5px; }}
+QLabel#bannerText {{ color: {c['text']}; }}
+QLabel#dim {{ color: {c['dim']}; }}
+QStatusBar {{ color: {c['dim']}; }}
+"""
+
     def stylesheet(self) -> str:
+        if self.native:
+            return self.system_stylesheet()
         if self.glass:
             return self.glass_stylesheet()
         c = {k: v.name() for k, v in vars(self).items() if isinstance(v, QColor)}
@@ -367,12 +513,59 @@ def theme() -> Theme:
 
 def apply_theme(name="dark") -> Theme:
     global _theme
-    _theme = Theme(name)
     app = QApplication.instance()
-    app.setStyle("Fusion")
+    _capture_native(app)
+    _theme = Theme(name)
+    app.setStyle(_theme.style)
     app.setPalette(_theme.palette())
     app.setStyleSheet(_theme.stylesheet())
     return _theme
+
+
+class KdeSchemeWatcher(QObject):
+    """Emits changed() when the Plasma colour scheme / accent / widget style changes, so the
+    "System" theme follows System Settings live. Plasma replaces kdeglobals by rename, which
+    drops the watch, so the file is re-added after every change; a slow re-check covers a
+    config dir that didn't exist yet when meat3 started."""
+    changed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.path = str(kdeglobals_path())
+        self.w = QFileSystemWatcher(self)
+        self.w.fileChanged.connect(self._poke)
+        self.w.directoryChanged.connect(self._poke)       # catches the file appearing later
+        self.debounce = QTimer(self, singleShot=True, interval=400)
+        self.debounce.timeout.connect(self._fire)
+        self._last = self._sig()
+        self._arm()
+        self.slow = QTimer(self, interval=3000)
+        self.slow.timeout.connect(self._fire)
+        self.slow.start()
+
+    def _arm(self):
+        if os.path.exists(self.path) and self.path not in self.w.files():
+            self.w.addPath(self.path)
+        d = os.path.dirname(self.path)
+        if os.path.isdir(d) and d not in self.w.directories():
+            self.w.addPath(d)
+
+    def _sig(self):
+        try:
+            with open(self.path, "rb") as f:
+                return hash(f.read())
+        except OSError:
+            return None
+
+    def _poke(self, *_):
+        self.debounce.start()
+
+    def _fire(self):
+        self._arm()
+        sig = self._sig()
+        if sig != self._last:          # the config dir changes all the time; only react to kdeglobals
+            self._last = sig
+            self.changed.emit()
 
 
 def mono_font(size_delta: float = 0) -> QFont:

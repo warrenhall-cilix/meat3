@@ -416,6 +416,47 @@ def _exercise(app, w, tmp, sock, osd_file, mock):
         w.grab().save(str(SHOTS / f"{nm}-liquid.png"))
     w.theme_actions["dark"].trigger()
     assert not theme().glass
+
+    # --- "System (follow KDE)": colours and style from kdeglobals, live when Plasma changes them
+    from meat3.gui.common import kdeglobals_path, read_kde_scheme
+    from PySide6.QtGui import QPalette
+    kg = kdeglobals_path()                                  # XDG_CONFIG_HOME is the test's temp dir
+    kg.parent.mkdir(parents=True, exist_ok=True)
+    light = ("[Colors:Window]\nBackgroundNormal=239,240,241\nForegroundNormal=35,38,41\n"
+             "[Colors:View]\nBackgroundNormal=255,255,255\nBackgroundAlternate=247,247,247\n"
+             "ForegroundNormal=35,38,41\nForegroundInactive=112,125,138\nForegroundNegative=218,68,83\n"
+             "ForegroundNeutral=246,116,0\nForegroundPositive=39,174,96\n"
+             "[Colors:Selection]\nBackgroundNormal=61,174,233\nForegroundNormal=255,255,255\n"
+             "[General]\nAccentColor=233,61,140\n[KDE]\nwidgetStyle=Fusion\n")
+    kg.write_text(light)
+    sc = read_kde_scheme()
+    assert sc["window"].name() == "#eff0f1" and sc["accent"].name() == "#e93d8c" and sc["style"] == "Fusion"
+    w.theme_actions["system"].trigger()
+    t = theme()
+    assert t.native and not t.dark and w.theme_actions["system"].isChecked()
+    assert app.palette().color(QPalette.Window).name() == "#eff0f1"
+    assert app.palette().color(QPalette.Highlight).name() == "#3daee9"
+    assert t.accent.name() == "#e93d8c" and t.red.name() == "#da4453"
+    assert t.style == "Fusion"                                 # kdeglobals [KDE] widgetStyle
+    assert "QPushButton {" not in app.styleSheet()        # standard widgets left to the desktop style
+    w.tabs.setCurrentIndex(w.tabs.indexOf(w.sensors))
+    _pump(app, 0.4)
+    w.grab().save(str(SHOTS / "sensors-system-light.png"))
+    # a dark scheme without a [Colors:Button] section: missing colours must follow the scheme
+    kg.write_text(light.replace("239,240,241", "32,35,38").replace("255,255,255\nBackgroundAlternate",
+                                                                     "20,22,24\nBackgroundAlternate")
+                  .replace("247,247,247", "29,31,34").replace("ForegroundNormal=35,38,41", "ForegroundNormal=252,252,252"))
+    t0 = time.monotonic()
+    while theme().window.name() != "#202326":                # Plasma switched to a dark scheme
+        assert time.monotonic() - t0 < 8, "System theme did not follow the kdeglobals change"
+        _pump(app, 0.1)
+    assert theme().dark and app.palette().color(QPalette.Window).name() == "#202326"
+    assert app.palette().color(QPalette.Button).lightness() < 128      # derived from the dark window
+    _pump(app, 0.3)
+    w.grab().save(str(SHOTS / "sensors-system-dark.png"))
+    w.theme_actions["dark"].trigger()
+    assert not theme().native and theme().style == "Fusion"
+    kg.unlink()
     w.tabs.setCurrentIndex(0)
 
     # --- hotkey picker: typed combo -> daemon -> label
