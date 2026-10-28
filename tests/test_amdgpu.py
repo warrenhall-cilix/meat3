@@ -553,6 +553,22 @@ class TestRaphaelLive(unittest.TestCase):
 class TestRdna4Extras(TreeCase):
     """SMU14 pp_table limits, real per-field OD ranges, SMU14 throttle names, hwmon limits."""
 
+    def test_real_asus_9070xt_pptable(self):
+        """Board pptable from a real ASUS RX 9070 XT VBIOS (115-G295BP00-100, 12/04/24; the copy at
+        flash offset 0xf4320), not a synthesized blob."""
+        from meat3.backends import amdgpu_pptable as P
+        with open(os.path.join(os.path.dirname(__file__), "fixtures/amdgpu/pp_table_asus_9070xt.bin"), "rb") as f:
+            pt = P.parse(f.read())
+        self.assertEqual(pt["structuresize"], 5812)
+        self.assertEqual(pt["clocks"], {"base": 1740, "game": 2460, "boost": 3010})
+        self.assertEqual(pt["socket_pl_ac_w"][0], 317)
+        self.assertEqual(pt["msg_ppt0_ac_w"], 340)
+        self.assertEqual((pt["od_min"]["Ppt"], pt["od_max"]["Ppt"]), (-30, 10))
+        self.assertEqual(P.od_param_ranges(pt), {"sclk_offset": (-500, 1000), "mclk_min": (97, 1500),
+                                                 "mclk_max": (97, 1500), "vddgfx_offset": (-200, 0)})
+        self.assertEqual((pt["temp_limits"]["Hotspot"], pt["fw_ctf_limits"]["Hotspot"]), (110, 118))
+        self.assertIn("Power limit (PPT %)", pt["od_features"])
+
     def test_pptable_roundtrip(self):
         from meat3.backends import amdgpu_pptable as P
         blob = P.build_blob({"clocks": (2400, 2450, 3100), "msg_ppt0_ac_w": 340,
