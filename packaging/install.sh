@@ -120,7 +120,7 @@ sudo mkdir -p /etc/meat3
 
 echo "== kernel modules for sensors (loaded at boot)"
 MODS=""
-for m in i2c-dev msr amd_uncore ryzen_smu it87 nct6775; do
+for m in i2c-dev msr amd_uncore ryzen_smu it87 nct6775 nct6683 drivetemp; do
     modinfo "$m" >/dev/null 2>&1 && MODS="$MODS$m\n"
 done
 printf "$MODS" | sudo tee /etc/modules-load.d/meat3.conf >/dev/null

@@ -42,7 +42,8 @@ Optional extras:
 | **ASUS ROG Astral** | **12V-2x6 per-pin voltage/current** (ITE IT8915FN), connector total, imbalance %, aux 12 V inputs |
 | **AMD GPU** (amdgpu) | Every `gpu_metrics` version (generated from kernel headers; RX 9070 XT = v1_3): edge/hotspot/memory/VR temperatures, GFX/SoC/memory voltages, all clocks, socket power, throttle reasons, fan, PCIe; plus hwmon and sysfs. **RX 9070 / 9070 XT:** board limits from the firmware power table (rated base/game/boost clocks, power and current limits, per-sensor throttle and shutdown temperatures, GFX voltage ceiling, overdrive headroom) and throttle reasons with RDNA4 names, including the GFX/SoC hotspots the driver's summary drops |
 | **AMD CPU** (Zen 2–5) | Per-core effective clock (APERF/MPERF), load, C-states, power, voltage, temperature; package power (RAPL/MSR); **FCLK/UCLK/MCLK**; **L3 in use per CCD (MB and %, via resctrl)**; **L3 hit rate per CCX**; **DRAM read/write bandwidth**; PPT/TDC/EDC; SVI3 rails |
-| **Board** | Super I/O fans/voltages/temperatures, NVMe, DDR5 SPD temperatures, chipset/NIC/Wi-Fi temperatures |
+| **Board** | Super I/O fans/voltages/temperatures, DDR5 SPD temperatures, chipset/NIC/Wi-Fi temperatures |
+| **Storage** | **NVMe:** every temperature sensor with the drive's own limits; health (life used/remaining, spare, total written/read, power-on hours, unsafe shutdowns, media errors, time over temperature, thermal throttling); PCIe link generation and width; read/write MB/s and active time. **SATA:** temperature (`drivetemp`), SMART via `smartctl` (reallocated/pending sectors, CRC errors, wear, total written). Sleeping hard drives are never woken. |
 
 ### Graphs tab
 
@@ -155,7 +156,41 @@ sudo systemctl disable --now meat3-web       # turn it off again
   - `cert`/`key` (PEM paths to serve HTTPS)
   - `auth` (`false` only behind your own authenticating proxy)
 - **Security:** plain HTTP sends the token unencrypted, which is fine on a home LAN. Over anything else, use `cert`/`key`, a reverse proxy, or `ssh -L 8733:localhost:8733 host`.
-- **Headless installs:** use `meat3-tui` over SSH for everything else. Debian/Proxmox needs `apt install git` first to clone.
+- **Headless installs:** use `meat3-tui` over SSH for everything else.
+
+### Prometheus + Grafana (many machines)
+
+`meat3-web` also serves every sensor at **`/metrics`** in Prometheus format, so one Prometheus/Grafana can watch all your machines. Install with `--web` on each machine.
+
+Metrics are named per unit and converted to base units:
+- `meat3_temperature_celsius`, `meat3_voltage_volts`, `meat3_power_watts`, `meat3_current_amperes`
+- `meat3_frequency_hertz`, `meat3_fan_speed_rpm`, `meat3_percent`, `meat3_size_bytes`, `meat3_throughput_bytes_per_second`, `meat3_duration_seconds`, `meat3_energy_joules`
+- anything else goes in `meat3_value`
+
+Every series is labelled `id`, `device`, `group`, `sensor` (the row's name) and `unit`. Also exported: `meat3_up`, `meat3_info{host,version}` and `meat3_poll_duration_seconds`.
+
+Scraping needs the login token as a bearer token. Either give every machine the same token, or set `"web": {"metrics_public": true}` on a trusted LAN:
+```sh
+sudo install -m 640 -g meat3 web.token /etc/meat3/web.token && sudo systemctl restart meat3-web   # same token everywhere
+```
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: meat3
+    scrape_interval: 10s
+    authorization:
+      credentials_file: /etc/prometheus/meat3.token      # contents of /etc/meat3/web.token
+    static_configs:
+      - targets: ['baconator:8733', 'proxmox1:8733', 'nas:8733']
+```
+For Grafana, import `packaging/grafana/meat3-dashboard.json` (Dashboards → New → Import). Pick machines with the *Machine* drop-down. It has:
+- **Overview:** status per machine, hottest sensor, and total GPU and CPU power.
+- **GPU:** temperatures, power, clocks and load.
+- **CPU:** temperature, power, clock and usage.
+- **Motherboard:** temperatures, fans, supply rails, and CPU/memory voltages.
+- **Storage:** temperatures, throughput, life remaining, total written, and media errors/unsafe shutdowns.
+
+Regenerate it with `tools/make_grafana_dashboard.py`. Debian/Proxmox needs `apt install git` first to clone.
 
 ## RX 9070 / 9070 XT (RDNA4) extras
 

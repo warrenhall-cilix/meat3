@@ -130,6 +130,34 @@ class TestWeb(unittest.TestCase):
         r, body = self.req("GET", "/api/meta", headers={"Accept-Encoding": "gzip"})
         self.assertEqual(r.getheader("Content-Encoding"), "gzip")
 
+    def test_metrics(self):
+        r, _ = self.req("GET", "/metrics", cookie=False)
+        self.assertEqual(r.status, 401)
+        self.assertIn("Bearer", r.getheader("WWW-Authenticate"))
+        r, _ = self.req("GET", "/metrics", cookie=False, headers={"Authorization": "Bearer nope"})
+        self.assertEqual(r.status, 401)
+        r, body = self.req("GET", "/metrics", cookie=False, headers={"Authorization": f"Bearer {TOKEN}"})
+        self.assertEqual(r.status, 200)
+        self.assertTrue(r.getheader("Content-Type").startswith("text/plain; version=0.0.4"))
+        text = body.decode()
+        self.assertIn("meat3_up 1", text)
+        line = next(l for l in text.splitlines() if 'id="nv0.clk.gpc"' in l)
+        self.assertTrue(line.startswith("meat3_frequency_hertz{"), line)
+        self.assertGreater(float(line.rsplit(" ", 1)[1]), 1e8)          # MHz -> Hz
+        self.assertIn('device="GPU 0: NVIDIA GeForce RTX 5080"', line)
+        import re
+        for l in text.splitlines():                                     # exposition format sanity
+            if not l.startswith("#"):
+                self.assertRegex(l, r'^meat3_[a-z_]+(\{([a-z]+="([^"\\]|\\.)*",?)+\})? -?[0-9.e+-]+$')
+        types = [l.split()[2] for l in text.splitlines() if l.startswith("# TYPE")]
+        self.assertEqual(len(types), len(set(types)))                   # each family declared once
+
+    def test_metrics_stale_when_disconnected(self):
+        txt = web.prometheus_text({"sensors": [{"id": "a", "group": "G", "label": "l", "unit": "W"}]},
+                                  {"connected": False, "v": {"a": [5, 0, 0, 0, 0]}})
+        self.assertIn("meat3_up 0", txt)
+        self.assertNotIn('id="a"', txt)
+
     def test_nan_is_null(self):
         self.assertIsNone(web._num(float("nan")))
         self.assertIsNone(web._num(float("inf")))

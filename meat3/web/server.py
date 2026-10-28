@@ -11,6 +11,8 @@ Read-only by design: the server only sends the daemon's read requests (hello, sn
 update_status) and has no endpoint that changes anything. The systemd unit also runs it as a
 dynamic user that the daemon doesn't grant write access to.
 
+Prometheus: GET /metrics (Authorization: Bearer <token>, or "metrics_public": true in the config).
+
 Login: a random token in /etc/meat3/web.token (root:meat3 0640). Opening /login?token=... (or
 pasting it into the login form) sets an HttpOnly cookie. Settings in /etc/meat3/config.json "web".
 """
@@ -50,7 +52,7 @@ HISTORY_MAX_S = 3600
 
 def web_config() -> dict:
     w = {"listen": "0.0.0.0", "port": 8733, "auth": True, "token_file": "/etc/meat3/web.token",
-         "history_s": 900, "cert": "", "key": ""}
+         "history_s": 900, "cert": "", "key": "", "metrics_public": False}
     w.update(config.get().get("web") or {})
     return w
 
@@ -203,6 +205,59 @@ def host_ips() -> list[str]:
     return out or [socket.gethostname()]
 
 
+# ----------------------------------------------------------------------------- Prometheus
+# unit -> (metric family, factor to the Prometheus base unit)
+PROM_UNITS = {
+    "°C": ("temperature_celsius", 1), "V": ("voltage_volts", 1), "mV": ("voltage_volts", 1e-3),
+    "W": ("power_watts", 1), "A": ("current_amperes", 1), "mA": ("current_amperes", 1e-3),
+    "MHz": ("frequency_hertz", 1e6), "GHz": ("frequency_hertz", 1e9), "RPM": ("fan_speed_rpm", 1),
+    "%": ("percent", 1), "MB/s": ("throughput_bytes_per_second", 1e6),
+    "GB/s": ("throughput_bytes_per_second", 1e9), "MB": ("size_bytes", 1e6), "GB": ("size_bytes", 1e9),
+    "TB": ("size_bytes", 1e12), "MiB": ("size_bytes", 2 ** 20), "GiB": ("size_bytes", 2 ** 30),
+    "h": ("duration_seconds", 3600), "min": ("duration_seconds", 60), "s": ("duration_seconds", 1),
+    "ms": ("duration_seconds", 1e-3), "us": ("duration_seconds", 1e-6), "J": ("energy_joules", 1),
+    "Wh": ("energy_joules", 3600), "kWh": ("energy_joules", 3.6e6),
+}
+PROM_HELP = {"value": "meat3 sensor without a base unit (see the unit label)"}
+
+
+def _plabel(v) -> str:
+    return str(v).replace("\\", "\\\\").replace("\n", " ").replace('"', '\\"')
+
+
+def prometheus_text(meta: dict, values: dict) -> str:
+    """Prometheus text exposition (v0.0.4) of every sensor: one family per base unit, labelled with
+    the sensor id, device, group path, label and the original unit."""
+    fams: dict[str, list[str]] = {}
+    live = values.get("v", {}) if values.get("connected") else {}      # no stale values when the daemon is gone
+    for m in meta.get("sensors", []):
+        row = live.get(m["id"])
+        if not row or row[0] is None:
+            continue
+        unit = m.get("unit") or ""
+        fam, k = PROM_UNITS.get(unit, ("value", 1))
+        grp = m.get("group") or ""
+        dev, _, sub = grp.partition("/")
+        lab = (f'id="{_plabel(m["id"])}",device="{_plabel(dev.strip())}",group="{_plabel(sub)}",'
+               f'sensor="{_plabel(m.get("label", ""))}",unit="{_plabel(unit)}"')
+        fams.setdefault(fam, []).append(f"meat3_{fam}{{{lab}}} {row[0] * k:.10g}")
+    out = []
+    up = 1 if values.get("connected") else 0
+    out += ["# HELP meat3_up 1 when meat3-web is getting data from the meat3d daemon", "# TYPE meat3_up gauge",
+            f"meat3_up {up}"]
+    host, ver = values.get("host") or socket.gethostname(), (values.get("update") or {}).get("installed") or ""
+    out += ["# HELP meat3_info meat3 build and host", "# TYPE meat3_info gauge",
+            f'meat3_info{{host="{_plabel(host)}",version="{_plabel(ver)}"}} 1']
+    if values.get("poll_ms") is not None:
+        out += ["# HELP meat3_poll_duration_seconds time the daemon took for its last sensor poll",
+                "# TYPE meat3_poll_duration_seconds gauge", f"meat3_poll_duration_seconds {values['poll_ms'] / 1000:.6g}"]
+    for fam in sorted(fams):
+        out.append(f"# HELP meat3_{fam} {PROM_HELP.get(fam, 'meat3 sensors, ' + fam.replace('_', ' '))}")
+        out.append(f"# TYPE meat3_{fam} gauge")
+        out += fams[fam]
+    return "\n".join(out) + "\n"
+
+
 # ----------------------------------------------------------------------------- HTTP
 LOGIN_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>meat³ login</title>
@@ -220,6 +275,7 @@ class Handler(BaseHTTPRequestHandler):
     hub: Hub = None
     token: Optional[str] = None
     secure = False
+    metrics_public = False
 
     def log_message(self, fmt, *args):       # quiet: no per-request lines in the journal
         pass
@@ -228,6 +284,9 @@ class Handler(BaseHTTPRequestHandler):
     def _authed(self) -> bool:
         if self.token is None:
             return True
+        auth = self.headers.get("Authorization") or ""
+        if auth.startswith("Bearer ") and hmac.compare_digest(auth[7:].strip().encode(), self.token.encode()):
+            return True                      # Prometheus: authorization.credentials(_file)
         for part in (self.headers.get("Cookie") or "").split(";"):
             k, _, v = part.strip().partition("=")
             if k == COOKIE and hmac.compare_digest(v.encode(), self.token.encode()):
@@ -295,6 +354,13 @@ class Handler(BaseHTTPRequestHandler):
                 time.sleep(0.5)
                 return self._login_page("Wrong token.", 403)
             return self._login_page()
+        if path == "/metrics":
+            if not (self.metrics_public or self._authed()):
+                return self._send(401, b"unauthorized: send 'Authorization: Bearer <token>'\n", "text/plain",
+                                  {"WWW-Authenticate": 'Bearer realm="meat3"'})
+            with self.hub.lock:
+                meta, values = self.hub.meta, self.hub.values
+            return self._send(200, prometheus_text(meta, values).encode(), "text/plain; version=0.0.4; charset=utf-8")
         if path == "/logout":
             return self._send(HTTPStatus.SEE_OTHER, b"", "text/plain",
                               {"Location": "/login", "Set-Cookie": f"{COOKIE}=; Path=/; Max-Age=0"})
@@ -358,8 +424,9 @@ class Server(ThreadingHTTPServer):
 
 
 def make_server(hub: Hub, listen: str, port: int, token: Optional[str],
-                cert: str = "", key: str = "") -> Server:
-    handler = type("BoundHandler", (Handler,), {"hub": hub, "token": token, "secure": bool(cert)})
+                cert: str = "", key: str = "", metrics_public: bool = False) -> Server:
+    handler = type("BoundHandler", (Handler,), {"hub": hub, "token": token, "secure": bool(cert),
+                                                "metrics_public": metrics_public})
     srv = Server((listen, port), handler)
     if cert:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -404,7 +471,8 @@ def main(argv=None) -> int:
             return 1
     hub = Hub(args.socket, w.get("history_s", 900))
     hub.start()
-    srv = make_server(hub, args.listen, args.port, token, w.get("cert", ""), w.get("key", ""))
+    srv = make_server(hub, args.listen, args.port, token, w.get("cert", ""), w.get("key", ""),
+                      bool(w.get("metrics_public", False)))
     print(f"meat3-web: {scheme}://{args.listen}:{args.port}/ (read-only; "
           f"{'token login' if token else 'NO login'}; daemon {args.socket})", flush=True)
     try:
