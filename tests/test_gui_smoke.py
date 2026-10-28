@@ -191,8 +191,43 @@ def _exercise(app, w, tmp, sock, osd_file, mock):
     g.grab().save(str(SHOTS / "sparkline.png"))
     g.close()
 
+    # --- graphs tab: Overview preset on first run, presets, merge, shared hover, persistence
+    from meat3.gui.graphs import preset_ids
+    w.tabs.setCurrentIndex(w.tabs.indexOf(w.graphs))
+    gp = w.graphs
+    _wait(app, lambda: len(gp.cards) >= 4, 5, "overview graphs")
+    first = [c.ids[0] for c in gp.cards]
+    assert set(first) == set(preset_ids("Overview", w.store.sensors)), first
+    n0 = len(gp.cards)
+    gp.add_preset("CPU cores")
+    assert len(gp.cards) == n0 + 8, len(gp.cards)
+    temps = [c for c in gp.cards if c.unit() == "°C"]
+    assert len(temps) >= 2, [c.ids for c in gp.cards]
+    assert gp.merge(temps[1], temps[0]) and len(temps[0].ids) == 2
+    watts = next(c for c in gp.cards if c.unit() == "W")
+    assert not gp.merge(watts, temps[0])                       # different units stay apart
+    sid = next(i for i, s_ in w.store.sensors.items() if s_.get("unit") == "V")
+    w.sensors.graph_toggle_requested.emit(sid, True)
+    assert sid in gp.ids() and sid in w.sensors.graph_ids()
+    w.sensors.graph_toggle_requested.emit(sid, False)
+    assert sid not in gp.ids()
+    for k in range(8):                                          # drop the per-core cards again
+        gp.remove_card(gp.cards[-1])
+    gp.split(temps[0])
+    gp.merge(gp.cards[gp.cards.index(temps[0]) + 1], temps[0])
+    _wait(app, lambda: all(len(w.store.history.get(i, ())) > 6 for i in gp.ids()), 10, "graph history")
+    gp.set_hover(w.store.t - 3)
+    _pump(app, 0.3)
+    w.grab().save(str(SHOTS / "graphs-dark.png"))
+    gp.set_hover(None)
+    import json as _json
+    from meat3.gui.common import settings as _settings
+    assert _json.loads(_settings().value("graphs/cards")) == [c.ids for c in gp.cards]
+    gp.cmb_window.setCurrentIndex(0)
+    assert gp.window_s == 60
+
     # --- cores tab: one table per CPU, 8 rows, voltage + temp columns present, values filled
-    w.tabs.setCurrentIndex(1)
+    w.tabs.setCurrentIndex(w.tabs.indexOf(w.cores))
     _pump(app, 1.2)
     cp = w.cores
     assert len(cp.tables) == 1, list(cp.tables)
@@ -215,7 +250,7 @@ def _exercise(app, w, tmp, sock, osd_file, mock):
     w.grab().save(str(SHOTS / "cores-dark.png"))
 
     # --- overclock tab: apply through the row code path
-    w.tabs.setCurrentIndex(2)
+    w.tabs.setCurrentIndex(w.tabs.indexOf(w.overclock))
     oc = w.overclock
     _wait(app, lambda: "nv0.oc.core_offset" in oc.rows, 5, "OC rows")
     assert set(oc.boxes) == {"GPU 0: NVIDIA GeForce RTX 5080", "GPU 1: AMD Radeon RX 9070 XT",
@@ -279,7 +314,7 @@ def _exercise(app, w, tmp, sock, osd_file, mock):
     oc.revert_all()
 
     # --- OSD
-    w.tabs.setCurrentIndex(3)
+    w.tabs.setCurrentIndex(w.tabs.indexOf(w.osd))
     _wait(app, lambda: w.link.osd.get("items"), 5, "osd_get")
     assert w.link.osd["hotkey"] == "KEY_RIGHTCTRL+KEY_F12"
     assert w.overlay.isVisible(), "overlay should follow daemon enabled=True"
@@ -343,15 +378,19 @@ def _exercise(app, w, tmp, sock, osd_file, mock):
     w.tabs.setCurrentIndex(0)
     _pump(app, 1.2)
     w.grab().save(str(SHOTS / "sensors-light.png"))
-    w.tabs.setCurrentIndex(2)
+    w.tabs.setCurrentIndex(w.tabs.indexOf(w.graphs))
+    _pump(app, 0.5)
+    w.grab().save(str(SHOTS / "graphs-light.png"))
+    w.tabs.setCurrentIndex(w.tabs.indexOf(w.overclock))
     _pump(app, 0.3)
     w.grab().save(str(SHOTS / "overclock-light.png"))
     # Liquid Ass theme screenshots (every tab)
     from meat3.gui.common import theme
     w.theme_actions["liquid"].trigger()
     assert theme().glass and w.theme_actions["liquid"].isChecked()
-    for idx, nm in ((0, "sensors"), (1, "cores"), (2, "overclock"), (3, "osd")):
-        w.tabs.setCurrentIndex(idx)
+    for page, nm in ((w.sensors, "sensors"), (w.graphs, "graphs"), (w.cores, "cores"),
+                     (w.overclock, "overclock"), (w.osd, "osd")):
+        w.tabs.setCurrentIndex(w.tabs.indexOf(page))
         _pump(app, 0.6)
         w.grab().save(str(SHOTS / f"{nm}-liquid.png"))
     w.theme_actions["dark"].trigger()

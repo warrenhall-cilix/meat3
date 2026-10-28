@@ -43,8 +43,8 @@ for i, sid in enumerate(targets):
                             QAbstractItemView.PositionAtCenter)
     pump(1.5)
     w.grab().save(os.path.join(out, f"live-sensors-{i}.png"))
-for idx, name in ((1, "cores"), (2, "overclock"), (3, "osd")):
-    w.tabs.setCurrentIndex(idx)
+for page, name in ((w.graphs, "graphs"), (w.cores, "cores"), (w.overclock, "overclock"), (w.osd, "osd")):
+    w.tabs.setCurrentIndex(w.tabs.indexOf(page))
     pump(2)
     w.grab().save(os.path.join(out, f"live-{name}.png"))
 print("sensors:", len(model.leaves))

@@ -380,6 +380,8 @@ class Sparkline(QWidget):
 
 class SensorsPage(QWidget):
     osd_toggle_requested = Signal(str, bool)   # sensor id, add?
+    graph_toggle_requested = Signal(str, bool)  # sensor id, add to the Graphs tab?
+    graph_ids = staticmethod(lambda: set())     # replaced by the main window: ids on the Graphs tab
     status = Signal(str)
 
     def __init__(self, store: SensorStore, link, parent=None):
@@ -546,6 +548,9 @@ class SensorsPage(QWidget):
             m.addAction("Copy label and value", lambda: self.copy(sid, True))
             m.addAction("Copy sensor id", lambda: QGuiApplication.clipboard().setText(sid))
             m.addSeparator()
+            on_graphs = sid in self.graph_ids()
+            m.addAction("Remove from Graphs" if on_graphs else "Add to Graphs",
+                        lambda: self.graph_toggle_requested.emit(sid, not on_graphs))
             m.addAction("Show graph…", lambda: self.show_graph(sid))
         elif pidx.isValid():
             src = self.proxy.mapToSource(pidx.siblingAtColumn(0))

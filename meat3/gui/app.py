@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QMainW
 
 from meat3.gui.client import DaemonLink, default_socket_path
 from meat3.gui.cores import CoresPage
+from meat3.gui.graphs import GraphsPage
 from meat3.gui.common import (THEMES, SensorStore, app_icon, apply_theme, install_none_refcount_guard,
                               paint_backdrop, setting_bool, settings, theme, theme_name)
 from meat3.gui.osd import OsdPage, OsdStyle, OverlayWindow
@@ -75,10 +76,12 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
         self.sensors = SensorsPage(self.store, self.link)
+        self.graphs = GraphsPage(self.store)
         self.cores = CoresPage(self.store)
         self.overclock = OverclockPage(self.store, self.link)
         self.osd = OsdPage(self.store, self.link, self.sensors.model, self.overlay, self.osd_style)
         self.tabs.addTab(self.sensors, "Sensors")
+        self.tabs.addTab(self.graphs, "Graphs")
         self.tabs.addTab(self.cores, "Cores")
         self.tabs.addTab(self.overclock, "Overclock")
         self.tabs.addTab(self.osd, "OSD")
@@ -94,9 +97,12 @@ class MainWindow(QMainWindow):
         sb.addPermanentWidget(self.poll_lbl)
         sb.addPermanentWidget(self.conn_lbl)
 
-        for page in (self.sensors, self.cores, self.overclock, self.osd):
+        for page in (self.sensors, self.graphs, self.cores, self.overclock, self.osd):
             page.status.connect(lambda m: self.statusBar().showMessage(m, 6000))
         self.sensors.osd_toggle_requested.connect(self._osd_toggle_item)
+        self.sensors.graph_ids = self.graphs.ids
+        self.sensors.graph_toggle_requested.connect(
+            lambda sid, add: self.graphs.add_sensor(sid) if add else self.graphs.remove_sensor(sid))
         self.cores.osd_toggle_requested.connect(self._osd_toggle_item)
         self.osd.style_changed.connect(self._style_changed)
         self.link.connected.connect(self._on_connected)
@@ -132,7 +138,7 @@ class MainWindow(QMainWindow):
             grp.addAction(a)
             self.theme_actions[key] = a
         m.addSeparator()
-        for i, name in enumerate(("Sensors", "Cores", "Overclock", "OSD")):
+        for i, name in enumerate(("Sensors", "Graphs", "Cores", "Overclock", "OSD")):
             a = m.addAction(name, lambda i=i: self.tabs.setCurrentIndex(i))
             a.setShortcut(QKeySequence(f"Ctrl+{i + 1}"))
         m = mb.addMenu("&OSD")

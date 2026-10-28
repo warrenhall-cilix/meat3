@@ -36,6 +36,15 @@ Optional extras:
 | **AMD CPU** (Zen 2–5) | Per-core effective clock (APERF/MPERF), load, C-states, power, voltage, temperature; package power (RAPL/MSR); **FCLK/UCLK/MCLK**; **L3 in use per CCD (MB and %, via resctrl)**; **L3 hit rate per CCX**; **DRAM read/write bandwidth**; PPT/TDC/EDC; SVI3 rails |
 | **Board** | Super I/O fans/voltages/temperatures, NVMe, DDR5 SPD temperatures, chipset/NIC/Wi-Fi temperatures |
 
+### Graphs tab
+
+A Task Manager / netdata style grid of live charts for any sensors you pick.
+- **Picking sensors:** tick them in the searchable tree on the left, use **Presets** (Overview, CPU cores, CPU clocks, GPU, Temperatures, Power), or right-click a sensor on the Sensors tab → **Add to Graphs**.
+- **Each card** shows the current value, a chart over the chosen window (1–30 min), and min/avg/max for that window. Percentages use a fixed 0–100 axis; everything else scales automatically.
+- **Hover** any chart: a crosshair moves across all charts at the same moment and shows every value at that time.
+- **Combine** charts by dragging one onto another (same unit only), e.g. GPU, hotspot and memory temperatures together. Right-click a card to split, reorder or remove it.
+- The last 30 minutes are kept in memory, so a newly added sensor shows its recent history straight away. Your layout is saved.
+
 ### Cores tab
 
 One row per CPU core: effective and active clock, voltage, temperature, power, usage, C0/CC6 residency, SMU Fmax and CPPC rank, with the session max next to clock, voltage, temperature and power. The fastest and hottest cores are bold. Right-click any cell to put that sensor, or the whole column, on the OSD. For a compact OSD, use the summary sensors **Hottest core temperature** and **Highest core voltage** (CPU → Per-core summary).
@@ -47,6 +56,8 @@ Per-core voltage is the SMU's requested VID for that core, not a socket measurem
 The **Cores** tab lists how much L3 each busy program is actually holding, live, in MB and as a share of the cache, plus "everything else".
 - **Games are detected automatically:** Steam titles through `SteamAppId` (including Proton/Wine helper processes), and other programs whose name matches `l3_per_app.game_patterns` (default `*.exe`).
 - **Game L3 in use** is a stable sensor that follows whichever game is running. Put it on the OSD to see how much of the X3D cache a game uses.
+
+**L3 reservation for games** (on by default; Overclock → L3 cache): while a game runs, everything else may only fill a small slice of L3 (default 12 MB) and the game gets the rest (84 MB on a 9800X3D) to itself, so browsers, Discord or shader compiles can't push the game's data out of the cache. On a 9800X3D with four cache-thrashing background threads, a 64 MB random-access test "game" went from 128 ns to 25.7 ns per access. It does nothing measurable without background load. It uses resctrl cache allocation (`cat_l3`), switches on 1–2 s after the game starts and off when it exits, and nothing persists across reboots.
 
 How it works: the daemon gives each tracked program its own resctrl monitoring group, and the CPU counts cache lines per group in hardware. This needs a CPU with `cqm_occup_llc` (AMD Zen 2+ and most Intel server/HEDT parts) and a kernel with `CONFIG_X86_CPU_RESCTRL`. The daemon mounts `/sys/fs/resctrl` itself. Cache lines count toward the program that filled them, so a newly tracked program ramps up over a second or two. Configure or disable it under `"l3_per_app"` in the config.
 
