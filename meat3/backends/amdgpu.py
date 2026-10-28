@@ -37,6 +37,8 @@ from . import amdgpu_metrics as gm
 from . import amdgpu_od as odm
 from . import amdgpu_pptable as ppt
 from . import amdgpu_smu14_full as fm
+from . import amdgpu_vrm as vrmm
+from ..core import config
 
 SYSFS_ROOT_ENV = "MEAT3_SYSFS_ROOT"
 DRY_RUN_ENV = "MEAT3_DRY_RUN"
@@ -300,6 +302,9 @@ class AmdGpuBackend(Backend):
         self.pptable = None
         self.is_smu14_dgpu = bool(self.mp1 and self.mp1[:2] == (14, 0) and not self.is_apu)
         self.full_slot = 0
+        self.vrm: Optional[vrmm.VrmAccess] = None
+        self.vrm_opener = None          # tests inject a fake SMBus here
+        self._vrm_tried = False
         if self.mp1 and self.mp1[:2] == (14, 0) and not self.is_apu:
             try:
                 self.pptable = ppt.parse(self.io.read_bytes(os.path.join(self.dev, "pp_table")))
@@ -545,6 +550,7 @@ class AmdGpuBackend(Backend):
         out += self._board_limits()
         if self.is_smu14_dgpu:
             out += self._full_metrics()
+            out += self._vrm_sensors()
         if self.is_apu and self.mp1 and tuple(self.mp1[:3]) == (13, 0, 5):
             self._mark_apu_power_unreliable(out)
         return out
@@ -859,9 +865,106 @@ class AmdGpuBackend(Backend):
 
     def controls(self) -> list[Control]:
         try:
-            return [c for c, _ in self._control_specs()]
+            return [c for c, _ in self._control_specs()] + self._vrm_controls()
         except Exception:
             return []
+
+    # ---- VRM over PMBus (RDNA4) -----------------------------------------------------
+
+    def _vrm_get(self) -> Optional[vrmm.VrmAccess]:
+        if self._vrm_tried or not self.is_smu14_dgpu:
+            return self.vrm
+        self._vrm_tried = True
+        cfg = config.get().get("amdgpu_vrm") or {}
+        if not cfg.get("enabled", True):
+            return None
+        real = self.io.root == "/"
+        if real and (os.geteuid() != 0):
+            return None
+        if real and not glob.glob("/dev/i2c-*"):
+            try:
+                import subprocess
+                subprocess.run(["modprobe", "i2c-dev"], capture_output=True, timeout=5)
+            except (OSError, subprocess.SubprocessError):
+                pass
+        try:
+            self.vrm = vrmm.VrmAccess(os.path.realpath(self.dev), serial=self.slot, opener=self.vrm_opener, cfg=cfg,
+                                      state_path=vrmm.STATE if real else os.path.join(self.io.root, "vrm_factory.json"))
+        except Exception as e:   # never break the backend over optional telemetry
+            self.vrm = None
+            self._vrm_error = str(e)
+        return self.vrm
+
+    def _vrm_sensors(self) -> list[Sensor]:
+        v = self._vrm_get()
+        if v is None:
+            return []
+        P, G = self.prefix, f"{self.name}/VRM (PMBus)"
+        if not v.controllers:
+            return [Sensor(f"{P}.vrm.status", G, "VRM controllers: none found", None, hint=v.error or "")]
+        data = v.read_all()
+        out = [Sensor(f"{P}.vrm.status", G, "VRM: " + ", ".join(
+            f"0x{c.addr:02x} {c.mfr} {c.model}".strip() for c in v.controllers), float(len(v.controllers)), "", 0,
+            "PMBus controllers on the GPU's SMU I2C bus; read via standard telemetry commands")]
+        for (addr, page), r in sorted(data.items()):
+            key, label = vrmm.RAILS[(addr, page)]
+            h = f"PMBus 0x{addr:02x} page {page}"
+            if "error" in r:
+                out.append(Sensor(f"{P}.vrm.{key}.vout", G, f"{label}: I2C error", None, hint=f"{h}: {r['error']}"))
+                continue
+            out.append(Sensor(f"{P}.vrm.{key}.vout", G, f"{label} voltage (measured)", r.get("vout"), "V", 3,
+                              h + " READ_VOUT" + ("" if r.get("vout") is not None else
+                                                  f" (non-linear VOUT_MODE, raw 0x{r['vout_raw']:04x})")))
+            out.append(Sensor(f"{P}.vrm.{key}.iout", G, f"{label} current", r.get("iout"), "A", 1, h + " READ_IOUT"))
+            out.append(Sensor(f"{P}.vrm.{key}.pout", G, f"{label} power", r.get("pout"), "W", 1, h + " READ_POUT"))
+            out.append(Sensor(f"{P}.vrm.{key}.temp", G, f"{label} VRM temperature", r.get("temp"), "°C", 0,
+                              h + " READ_TEMPERATURE_1"))
+            if "vin" in r:
+                out.append(Sensor(f"{P}.vrm.{key}.vin", G, f"{label} input voltage", r.get("vin"), "V", 2, h + " READ_VIN"))
+                out.append(Sensor(f"{P}.vrm.{key}.iin", G, f"{label} input current", r.get("iin"), "A", 1, h + " READ_IIN"))
+            out.append(Sensor(f"{P}.vrm.{key}.offset", G, f"{label} voltage offset", r.get("offset_mv"), "mV", 1,
+                              h + f" VOUT_CAL_OFFSET raw 0x{r['offset_raw']:04x}, factory 0x{r['factory_raw']:04x}"))
+        return out
+
+    def _vrm_controls(self) -> list[Control]:
+        v = self.vrm
+        if v is None or not v.controllers:
+            return []
+        P, G = self.prefix, f"{self.name}/VRM voltage offsets (PMBus)"
+        out = []
+        data = v.last or v.read_all()
+        warn = ("DANGEROUS: writes the VRM controller's VOUT_CAL_OFFSET directly, outside the driver and "
+                "firmware limits. Positive values raise real voltage and heat; RDNA4 firmware partly "
+                "compensates because VID is inside its control loop. Volatile: a power cycle restores it.")
+        for (addr, page), r in sorted(data.items()):
+            key, label = vrmm.RAILS[(addr, page)]
+            ok, why = v.can_write(addr, page)
+            fac = r.get("factory_raw")
+            c = next(c for c in v.controllers if c.addr == addr)
+            e = vrmm.vout_exp(c.mode.get(page, 0xFF))
+            fac_mv = None if fac is None or e is None else (fac - 0x10000 if fac & 0x8000 else fac) * 2.0 ** e * 1000
+            out.append(Control(f"{P}.vrm.{key}.offset", G, f"{label} offset", "int",
+                               None if r.get("offset_mv") is None else round(r["offset_mv"]),
+                               min=-v.max_offset_mv, max=v.max_offset_mv, step=5, unit="mV",
+                               default=None if fac_mv is None else round(fac_mv), danger=2, available=ok,
+                               hint=(why + ". " if why else "") + warn))
+            out.append(Control(f"{P}.vrm.{key}.reset", G, f"{label}: restore factory offset", "action",
+                               danger=1, available=ok, hint=why or "writes back the value found the first time"))
+        return out
+
+    def _vrm_apply(self, control_id: str, value: Any) -> tuple[bool, str]:
+        v = self.vrm
+        if v is None:
+            return False, "VRM access unavailable"
+        _, _, key, what = control_id.split(".", 3)
+        rail = next(((a, p) for (a, p), (k, _l) in vrmm.RAILS.items() if k == key), None)
+        if rail is None:
+            return False, f"unknown rail {key}"
+        if what == "reset":
+            return v.reset(*rail)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False, "expected a number of mV"
+        return v.set_offset_mv(rail[0], rail[1], float(value))
 
     # ---- apply -----------------------------------------------------------------------
 
@@ -869,6 +972,8 @@ class AmdGpuBackend(Backend):
         self.io.write(path, data)
 
     def apply(self, control_id: str, value: Any) -> tuple[bool, str]:
+        if control_id.startswith(f"{self.prefix}.vrm."):
+            return self._vrm_apply(control_id, value)
         try:
             specs = {c.id: (c, meta) for c, meta in self._control_specs()}
         except Exception as e:  # pragma: no cover

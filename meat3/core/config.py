@@ -34,6 +34,10 @@ DEFAULTS = {
     # fill `background_mb` of L3 and the game gets the rest exclusively. Needs l3_per_app (game
     # detection). Rounded to whole L3 ways (6 MB each on a 9800X3D), at most half the cache.
     "l3_reserve": {"enabled": True, "background_mb": 12},
+    # RDNA4 VRM controllers over PMBus (GPU's own "AMDGPU SMU" I2C buses, addresses 0x22/0x24/0x26).
+    # Telemetry is read-only. Voltage offset writes are off unless allow_writes is true, and are
+    # clamped to +-max_offset_mv. Offsets are volatile: a power cycle restores the factory value.
+    "amdgpu_vrm": {"enabled": True, "allow_writes": False, "max_offset_mv": 50},
     # AMD Ryzen SMU overclocking (Curve Optimizer, PBO PPT/TDC/EDC) via ryzen_smu.
     # Validated on Granite Ridge (9800X3D): CO all/per-core write+readback+stress, PPT write+readback.
     "amd_smu_controls": True,
