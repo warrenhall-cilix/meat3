@@ -11,6 +11,7 @@ import importlib
 import inspect
 import json
 import os
+import signal
 import pkgutil
 import pwd
 import shutil
@@ -324,6 +325,39 @@ def hotkey_thread(state: State):
             scan(); last_scan = time.time()
 
 
+# ----------------------------------------------------------------------------- apply_on_start
+def _clear_marker() -> None:
+    try:
+        os.unlink(config.BOOT_APPLY_MARKER)
+    except OSError:
+        pass
+
+
+def apply_on_start(state) -> bool:
+    """Apply config 'apply_on_start' once, guarded against crash loops (see config.BOOT_APPLY_MARKER)."""
+    items = config.get().get("apply_on_start") or {}
+    if not items:
+        return False
+    if os.path.exists(config.BOOT_APPLY_MARKER):
+        print(f"meat3d: NOT applying apply_on_start: the previous start applied it and did not run "
+              f"{config.BOOT_APPLY_GRACE_S} s or stop cleanly (crash?). Fix the values, then delete "
+              f"{config.BOOT_APPLY_MARKER} or re-save (meat3-cotune --save-boot).")
+        return False
+    os.makedirs(os.path.dirname(config.BOOT_APPLY_MARKER), exist_ok=True)
+    with open(config.BOOT_APPLY_MARKER, "w") as f:
+        f.write(f"{time.time()}\n")
+        f.flush()
+        os.fsync(f.fileno())
+    for cid, val in items.items():
+        b = state.ctl_owner.get(cid)
+        ok, msg = b.apply(cid, val) if b is not None else (False, "unknown control")
+        print(f"meat3d: apply_on_start {cid}={val}: {'ok' if ok else 'FAILED'} {msg}")
+    t = threading.Timer(config.BOOT_APPLY_GRACE_S, _clear_marker)
+    t.daemon = True
+    t.start()
+    return True
+
+
 # ----------------------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser(prog="meat3d")
@@ -364,6 +398,21 @@ def main():
     if not args.no_hotkey:
         threading.Thread(target=hotkey_thread, args=(state,), daemon=True).start()
     print(f"meat3d {VERSION}: {len(backends)} backends, socket {args.socket}")
+    applied = apply_on_start(state)
+    if applied:
+        state.refresh_controls()
+
+    def on_term(*_):
+        if applied:
+            _clear_marker()          # clean stop: the boot-apply values did not crash this boot
+        for b in backends:
+            try:
+                b.close()
+            except Exception:
+                pass
+        os._exit(0)
+    signal.signal(signal.SIGTERM, on_term)
+    signal.signal(signal.SIGINT, on_term)
     interval = float(config.get().get("poll_interval_s", 1.0))
     n = 0
     while True:

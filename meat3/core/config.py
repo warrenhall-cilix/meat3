@@ -7,6 +7,10 @@ import os
 import threading
 
 PATH = os.environ.get("MEAT3_CONFIG", "/etc/meat3/config.json")
+# apply_on_start crash guard: written before applying, removed after BOOT_APPLY_GRACE_S of uptime
+# or on a clean daemon stop. Still present at the next start = that boot died -> skip applying.
+BOOT_APPLY_MARKER = "/var/lib/meat3/boot_apply.pending"
+BOOT_APPLY_GRACE_S = 300
 
 DEFAULTS = {
     # Board power/current correction for shunt-modded cards, keyed by PCI address ("0000:01:00.0")
@@ -29,6 +33,8 @@ DEFAULTS = {
     # AMD Ryzen SMU overclocking (Curve Optimizer, PBO PPT/TDC/EDC) via ryzen_smu.
     # Validated on Granite Ridge (9800X3D): CO all/per-core write+readback+stress, PPT write+readback.
     "amd_smu_controls": True,
+    # Controls applied when meat3d starts, e.g. {"cpu0.smu.co_core0": -20} (meat3-cotune --save-boot).
+    "apply_on_start": {},
     # Safety guards evaluated by the daemon every poll. sensor: glob on sensor id ("*" wildcard),
     # trips when value > above for `count` consecutive polls; then applies control glob := value.
     "guards": [

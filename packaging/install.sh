@@ -9,7 +9,7 @@ USER_NAME="${SUDO_USER:-$USER}"
 
 if [[ "${1:-}" == "--uninstall" ]]; then
     sudo systemctl disable --now meat3d.service 2>/dev/null || true
-    sudo rm -rf "$PREFIX" /etc/systemd/system/meat3d.service /usr/local/bin/meat3 /usr/local/bin/meat3d \
+    sudo rm -rf "$PREFIX" /etc/systemd/system/meat3d.service /usr/local/bin/meat3 /usr/local/bin/meat3d /usr/local/bin/meat3-cotune \
         /usr/share/applications/meat3.desktop
     sudo systemctl daemon-reload
     echo "meat3 removed (config kept in /etc/meat3)"; exit 0
@@ -45,7 +45,11 @@ sudo tee /usr/local/bin/meat3 >/dev/null <<EOF
 #!/bin/sh
 cd $PREFIX && exec /usr/bin/python3 -m meat3.gui "\$@"
 EOF
-sudo chmod 755 /usr/local/bin/meat3 /usr/local/bin/meat3d
+sudo tee /usr/local/bin/meat3-cotune >/dev/null <<EOF
+#!/bin/sh
+cd $PREFIX && exec /usr/bin/python3 -m meat3.cotune "\$@"
+EOF
+sudo chmod 755 /usr/local/bin/meat3 /usr/local/bin/meat3d /usr/local/bin/meat3-cotune
 
 echo "== group 'meat3' (allowed to apply overclocks / change OSD)"
 getent group meat3 >/dev/null || sudo groupadd --system meat3

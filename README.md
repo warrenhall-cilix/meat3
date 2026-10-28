@@ -42,6 +42,14 @@ One row per CPU core: effective and active clock, voltage, temperature, power, u
 
 Per-core voltage is the SMU's requested VID for that core, not a socket measurement. It is good for comparing cores and seeing Curve Optimizer changes.
 
+### L3 cache by app and by game
+
+The **Cores** tab lists how much L3 each busy program is actually holding, live, in MB and as a share of the cache, plus "everything else".
+- **Games are detected automatically:** Steam titles through `SteamAppId` (including Proton/Wine helper processes), and other programs whose name matches `l3_per_app.game_patterns` (default `*.exe`).
+- **Game L3 in use** is a stable sensor that follows whichever game is running. Put it on the OSD to see how much of the X3D cache a game uses.
+
+How it works: the daemon gives each tracked program its own resctrl monitoring group, and the CPU counts cache lines per group in hardware. This needs a CPU with `cqm_occup_llc` (AMD Zen 2+ and most Intel server/HEDT parts) and a kernel with `CONFIG_X86_CPU_RESCTRL`. The daemon mounts `/sys/fs/resctrl` itself. Cache lines count toward the program that filled them, so a newly tracked program ramps up over a second or two. Configure or disable it under `"l3_per_app"` in the config.
+
 ## Overclocking
 
 - **NVIDIA:** power limit, core/memory offsets, max-clock lock, XBAR/SYS offsets, MSVDD/NVVDD Vrel offsets.
@@ -53,6 +61,21 @@ Per-core voltage is the SMU's requested VID for that core, not a socket measurem
   - Validated on a 9800X3D (Granite Ridge): CO −5 write and per-core readback, 45 s verified stress with no errors, restore; PPT 162→170→162 W read back from the SMU power table.
   - SMU settings are not persistent and reset at reboot.
   - Disable with `"amd_smu_controls": false` in the config.
+
+### Per-core Curve Optimizer tuner (`meat3-cotune`)
+
+```sh
+sudo meat3-cotune                           # all cores, best CPPC-ranked first; 60 s per step, down to -30
+sudo meat3-cotune --cores 0,4 --floor -40 --step-time 300    # longer, deeper search on chosen cores
+sudo meat3-cotune --status                  # results so far
+sudo meat3-cotune --apply                   # apply results (last pass + 3 margin)
+sudo meat3-cotune --verify-all 30           # 30 min all-core verified stress with the results applied
+sudo meat3-cotune --save-boot               # have meat3d apply them at every boot
+```
+- **How a step is tested:** one core at a time, CO is stepped down by 5 and that core alone runs single-threaded stress-ng with result verification (several methods, then a bursty phase for boost transitions). A step fails on a verification error or a kernel machine-check / segfault / GPF.
+- **Crash-safe:** each step is recorded on disk before it runs. If the PC hangs or reboots, CO resets to the BIOS values, and the next `meat3-cotune` run marks that value unstable and carries on.
+- **Boot apply is guarded:** if a boot dies within 5 minutes of applying the values, the next start skips them and logs why.
+- **Quick mode is a first pass:** a CO that passes it can still fail in real use. For daily use, follow it with long `--step-time` runs and `--verify-all`.
 
 Every control is range-checked by the daemon. Only root or members of group `meat3` can apply changes. Settings are not persistent: save a profile in the GUI and re-apply it.
 
