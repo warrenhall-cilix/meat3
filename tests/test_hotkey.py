@@ -33,6 +33,21 @@ class TestHotkey(unittest.TestCase):
             M.write_config(p, M.generate([], hotkey="KEY_RIGHTCTRL+KEY_F12", hotkey_owner="daemon"))
             self.assertFalse(M.set_toggle_key(p, "KEY_LEFTALT+KEY_O"))             # daemon mode: untouched
 
+    def test_global_mangohud(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": d}):
+            self.assertFalse(M.global_enabled())
+            p = M.set_global(True, os.path.join(d, "meat3", "MangoHud.conf"))
+            self.assertEqual(p, M.env_file())
+            self.assertTrue(M.global_enabled())
+            txt = open(p).read()
+            self.assertIn("MANGOHUD=1\n", txt)
+            self.assertIn(f"MANGOHUD_CONFIGFILE={d}/meat3/MangoHud.conf\n", txt)
+            with self.assertRaises(ValueError):
+                M.set_global(True, "/tmp/my games/MangoHud.conf")
+            M.set_global(False, "")
+            self.assertFalse(M.global_enabled())
+            M.set_global(False, "")                         # already off: fine
+
     def test_daemon_osd_set_hotkey(self):
         from meat3.daemon import meat3d as D
         st = mock.Mock()

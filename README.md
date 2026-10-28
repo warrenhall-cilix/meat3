@@ -191,6 +191,10 @@ tool is still untested on hardware.
 
 
 - Pick sensors in the **OSD** tab and toggle with **Right Ctrl + F12**. The hotkey works system-wide, including in fullscreen games, because the daemon reads the keyboard.
+- **MangoHud in every game:** tick *In every game* in the OSD tab's MangoHud box. MangoHud then loads
+  into every Vulkan game (all Proton games) with no launch options. It starts hidden; press the
+  hotkey. It sets `MANGOHUD=1` in `~/.config/environment.d/90-meat3-mangohud.conf`, read at login, so
+  log out and back in once. OpenGL-only games still need `mangohud %command%`.
 - **Change the hotkey:** OSD tab → *Change…* (press the new combo), or `h` in `meat3-tui`. The daemon
   switches immediately. meat3 also rewrites `toggle_hud` in its MangoHud config, so the same keys toggle
   MangoHud in game; MangoHud reloads its config live. Use 1–4 keys ending in a normal key, e.g.

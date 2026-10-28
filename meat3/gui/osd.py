@@ -372,10 +372,16 @@ class OsdPage(QWidget):
         opts = QHBoxLayout()
         self.mh_fps = QCheckBox("Include MangoHud FPS")
         self.mh_fps.setChecked(setting_bool(st, "mangohud/fps", True))
+        self.mh_global = QCheckBox("In every game")
+        self.mh_global.setToolTip("Load MangoHud into every Vulkan game (all Proton games) without launch options.\n"
+                                  "It starts hidden: press the OSD hotkey in game. Takes effect after you log out and back in.")
+        self.mh_global.setChecked(mangohud.global_enabled())
+        self.mh_global.toggled.connect(self._set_global)
         self.mh_auto = QCheckBox("Regenerate when items change")
         self.mh_auto.setChecked(setting_bool(st, "mangohud/auto", False))
         opts.setSpacing(16)
         opts.addWidget(self.mh_fps)
+        opts.addWidget(self.mh_global)
         opts.addWidget(self.mh_auto)
         opts.addStretch(1)
         self.btn_gen = QPushButton("Generate config")
@@ -546,8 +552,32 @@ class OsdPage(QWidget):
             self.status.emit(f"Hotkey is now {pretty_hotkey('+'.join(keys))}.{note}")
         self.link.request({"cmd": "osd_set", "hotkey": keys}, done)
 
+    def _set_global(self, on: bool):
+        try:
+            if on:
+                path = self.generate_mangohud(quiet=True)
+                if not path:
+                    raise ValueError("couldn't write the MangoHud config")
+                mangohud.set_global(True, path)
+                self.status.emit("MangoHud will load in every Vulkan game, hidden until you press the hotkey. "
+                                 "Log out and back in for it to take effect.")
+            else:
+                mangohud.set_global(False, "")
+                self.status.emit("MangoHud no longer loads in every game (after you log out and back in). "
+                                 "Use the launch option below per game.")
+        except (OSError, ValueError) as e:
+            self.status.emit(f"Couldn't change it: {e}")
+            self.mh_global.blockSignals(True)
+            self.mh_global.setChecked(mangohud.global_enabled())
+            self.mh_global.blockSignals(False)
+        self._update_usage()
+
     def _update_usage(self):
         path = os.path.expanduser(self.mh_path.text().strip() or str(config_dir() / "MangoHud.conf"))
+        if getattr(self, "mh_global", None) is not None and self.mh_global.isChecked():
+            self.mh_usage.setText("No launch options needed: MangoHud loads in every Vulkan game.\n"
+                                  "OpenGL-only games still need:  mangohud %command%")
+            return
         self.mh_usage.setText(f"Steam launch options:\nMANGOHUD_CONFIGFILE={path} mangohud %command%")
 
     def osd_file(self) -> str:
@@ -562,7 +592,8 @@ class OsdPage(QWidget):
                                      position=corner, font_size=max(14, int(self.style_.font_size * 1.6)),
                                      include_fps=self.mh_fps.isChecked(),
                                      hotkey_owner=self.mh_owner.currentData(),
-                                     start_hidden=not self.link.osd.get("enabled", True))
+                                     start_hidden=mangohud.global_enabled() or self.mh_global.isChecked()
+                                     or not self.link.osd.get("enabled", True))
             mangohud.write_config(path, text)
         except (OSError, ValueError) as e:
             self.status.emit(f"MangoHud config not written: {e}")

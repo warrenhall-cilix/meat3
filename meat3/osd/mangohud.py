@@ -113,6 +113,38 @@ def set_toggle_key(path: str, hotkey: str) -> bool:
     return hit and bool(ks)
 
 
+def env_file() -> Path:
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    return Path(base) / "environment.d" / "90-meat3-mangohud.conf"
+
+
+def global_enabled() -> bool:
+    return env_file().exists()
+
+
+def set_global(enabled: bool, config_path: str) -> Path:
+    """Load MangoHud into every Vulkan game (all Proton/DXVK/VKD3D games) via the session environment.
+
+    MangoHud's implicit Vulkan layer switches on with MANGOHUD=1, and MANGOHUD_CONFIGFILE points it at
+    meat3's config, so no per-game launch options are needed. systemd's environment.d is read at login
+    (KDE and GNOME), so it takes effect after logging out and back in. OpenGL-only games still need
+    the `mangohud` wrapper."""
+    p = env_file()
+    if not enabled:
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            pass
+        return p
+    cfg = os.path.abspath(os.path.expanduser(config_path))
+    if any(c in cfg for c in "\n\"'$`\\ "):
+        raise ValueError("MangoHud config path must not contain spaces, quotes, $ or backslashes")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    write_config(str(p), "# written by meat3 (OSD tab > MangoHud in every game); delete this file to undo\n"
+                         f"MANGOHUD=1\nMANGOHUD_CONFIGFILE={cfg}\n")
+    return p
+
+
 def exec_command(line_no: int, osd_file: str = DEFAULT_OSD_FILE) -> str:
     """Builtin-only /bin/sh command printing the value part of line `line_no` (1-based).
 

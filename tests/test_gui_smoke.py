@@ -412,6 +412,7 @@ def _exercise(app, w, tmp, sock, osd_file, mock):
     hd._typed("leftalt")
     assert not hd.ok.isEnabled()
     assert pretty_hotkey("KEY_RIGHTCTRL+KEY_F12") == "Right Ctrl + F12"
+    assert w.osd.mh_global.text() == "In every game"
     got = {}
     w.link.request({"cmd": "osd_set", "hotkey": ["KEY_LEFTALT", "KEY_O"]}, lambda r: got.setdefault("r", r))
     _wait(app, lambda: "r" in got, 5, "osd_set hotkey")
