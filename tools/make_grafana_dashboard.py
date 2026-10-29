@@ -111,6 +111,20 @@ panels += [panel("NVMe life remaining", f'meat3_percent{{{SEL},id=~`storage\\..*
                  "none", 16, y, 8, 6, "{{instance}} {{group}} {{sensor}}", "table",
                  {"options": {"showHeader": True}, "transformations": [{"id": "reduce", "options": {"reducers": ["lastNotNull"]}}]})]
 
+y += 6
+panels.append(row("Network", y)); y += 1
+NET_LEG = "{{instance}} {{group}} {{sensor}}"
+panels += [panel("Network bandwidth", f'meat3_throughput_bytes_per_second{{{SEL},id=~`net\\.[^.]+\\.(rx|tx)`,id!~`net\\.total\\..*`}} * 8',
+                 "bps", 0, y, legend=NET_LEG),
+           panel("Link utilisation / TCP retransmits", f'meat3_percent{{{SEL},id=~`net\\..*\\.(util|retrans)`}}',
+                 "percent", 12, y, legend=NET_LEG)]
+y += 8
+panels += [panel("Downloaded / uploaded since boot", f'meat3_size_bytes{{{SEL},id=~`net\\..*_total`}}', "decbytes",
+                 0, y, 12, 6, NET_LEG, "bargauge",
+                 {"options": {"displayMode": "basic", "orientation": "horizontal", "reduceOptions": {"calcs": ["lastNotNull"]}}}),
+           panel("Network errors / drops (per minute)", f'rate(meat3_value{{{SEL},id=~`net\\..*\\.(errors|drops)`}}[5m]) * 60',
+                 "none", 12, y, 12, 6, NET_LEG)]
+
 dash = {
     "title": "meat³ hardware",
     "uid": "meat3-hardware",

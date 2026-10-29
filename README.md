@@ -44,6 +44,7 @@ Optional extras:
 | **AMD CPU** (Zen 2–5) | Per-core effective clock (APERF/MPERF), load, C-states, power, voltage, temperature; package power (RAPL/MSR); **FCLK/UCLK/MCLK**; **L3 in use per CCD (MB and %, via resctrl)**; **L3 hit rate per CCX**; **DRAM read/write bandwidth**; PPT/TDC/EDC; SVI3 rails |
 | **Board** | Super I/O fans/voltages/temperatures, DDR5 SPD temperatures, chipset/NIC/Wi-Fi temperatures |
 | **Storage** | **NVMe:** every temperature sensor with the drive's own limits; health (life used/remaining, spare, total written/read, power-on hours, unsafe shutdowns, media errors, time over temperature, thermal throttling); PCIe link generation and width; read/write MB/s and active time. **SATA:** temperature (`drivetemp`), SMART via `smartctl` (reallocated/pending sectors, CRC errors, wear, total written). Sleeping hard drives are never woken. |
+| **Network** | Per interface (Ethernet, Wi-Fi, USB tethering, VPN tunnels): **download/upload in Mbit/s**, link utilisation against the negotiated speed, data since boot, packets/s, errors and drops, link up/down and speed (spots a cable stuck at 100 Mbit/s), **Wi-Fi signal (dBm) and link quality**. System-wide: total bandwidth, TCP connections and **TCP retransmit %** (packet loss). Docker/VM bridges and veths are skipped. Graphs → Presets → **Network**. |
 
 ### Graphs tab
 
@@ -178,6 +179,8 @@ Metrics are named per unit and converted to base units:
 - `meat3_frequency_hertz`, `meat3_fan_speed_rpm`, `meat3_percent`, `meat3_size_bytes`, `meat3_throughput_bytes_per_second`, `meat3_duration_seconds`, `meat3_energy_joules`
 - anything else goes in `meat3_value`
 
+Network rates (Mbit/s in the UI) are exported as bytes/s in `meat3_throughput_bytes_per_second`. Multiply by 8 for bits.
+
 Every series is labelled `id`, `device`, `group`, `sensor` (the row's name) and `unit`. Also exported: `meat3_up`, `meat3_info{host,version}` and `meat3_poll_duration_seconds`.
 
 Scraping needs the login token as a bearer token. Either give every machine the same token, or set `"web": {"metrics_public": true}` on a trusted LAN:
@@ -200,6 +203,7 @@ For Grafana, import `packaging/grafana/meat3-dashboard.json` (Dashboards → New
 - **CPU:** temperature, power, clock and usage.
 - **Motherboard:** temperatures, fans, supply rails, and CPU/memory voltages.
 - **Storage:** temperatures, throughput, life remaining, total written, and media errors/unsafe shutdowns.
+- **Network:** bandwidth per interface, link utilisation and TCP retransmits, data since boot, and errors/drops per minute.
 
 Regenerate it with `tools/make_grafana_dashboard.py`.
 

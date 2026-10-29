@@ -125,7 +125,7 @@ def prefix_kind(prefix: str) -> str:
     for k in ("amdgpu", "nv", "cpu"):
         if re.match(rf"^{k}\d+$", prefix):
             return k
-    return "other"
+    return "net" if prefix == "net" else "other"
 
 
 def overview_devices(order: list[str], sensors: dict) -> list[tuple[str, str]]:
@@ -136,7 +136,7 @@ def overview_devices(order: list[str], sensors: dict) -> list[tuple[str, str]]:
         if p not in seen:
             seen.add(p)
             out.append((p, sensors[sid].get("group", p).split("/")[0]))
-    rank = {"nv": 0, "amdgpu": 1, "cpu": 2, "other": 3}
+    rank = {"nv": 0, "amdgpu": 1, "cpu": 2, "net": 3, "other": 4}
     return sorted(out, key=lambda d: rank[prefix_kind(d[0])])
 
 
@@ -144,6 +144,26 @@ def overview_rows(p: str, order: list[str], sensors: dict) -> list[tuple]:
     """Headline rows of one device: (label, sensor, bar max) or ('pins'/'cores', [sensors], None)."""
     kind = prefix_kind(p)
     rows = []
+    if kind == "net":
+        # per connected interface: download/upload (bar = link speed), Wi-Fi signal; then TCP totals
+        for sid in order:
+            m = re.match(r"net\.(.+)\.link$", sid)
+            if not m or not sensors[sid].get("value") or m.group(1) == "total":
+                continue
+            ip, name = f"net.{m.group(1)}", sensors[sid].get("group", "").split("/")[-1].split(":")[0]
+            speed = (sensors.get(f"{ip}.speed") or {}).get("value")
+            for key, arrow in (("rx", "↓"), ("tx", "↑")):
+                s = sensors.get(f"{ip}.{key}")
+                if s and s.get("value") is not None:
+                    rows.append((f"{name} {arrow}", s, speed))
+            s = sensors.get(f"{ip}.wifi.signal")
+            if s and s.get("value") is not None:
+                rows.append((f"{name} signal", s, None))
+        for sid, label in (("net.tcp.established", "TCP connections"), ("net.tcp.retrans", "TCP retransmits")):
+            s = sensors.get(sid)
+            if s and s.get("value") is not None:
+                rows.append((label, s, None))
+        return rows[:10]
     if kind in HEADLINES:
         for rx, label, bmax in HEADLINES[kind]:
             for sid in order:

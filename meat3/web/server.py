@@ -237,6 +237,7 @@ PROM_UNITS = {
     "W": ("power_watts", 1), "A": ("current_amperes", 1), "mA": ("current_amperes", 1e-3),
     "MHz": ("frequency_hertz", 1e6), "GHz": ("frequency_hertz", 1e9), "RPM": ("fan_speed_rpm", 1),
     "%": ("percent", 1), "MB/s": ("throughput_bytes_per_second", 1e6), "MiB/s": ("throughput_bytes_per_second", 2 ** 20),
+    "Mbit/s": ("throughput_bytes_per_second", 1e6 / 8),
     "GB/s": ("throughput_bytes_per_second", 1e9), "MB": ("size_bytes", 1e6), "GB": ("size_bytes", 1e9),
     "TB": ("size_bytes", 1e12), "MiB": ("size_bytes", 2 ** 20), "GiB": ("size_bytes", 2 ** 30),
     "h": ("duration_seconds", 3600), "min": ("duration_seconds", 60), "s": ("duration_seconds", 1),

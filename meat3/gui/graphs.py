@@ -54,6 +54,7 @@ PRESETS: dict[str, list[str]] = {
             r"^(amdgpu|amd)\d+\.(gm\.(average|current)_(gfxclk|uclk)_frequency|gm\.average_gfx_activity|"
             r"gm\.(average|current)_socket_power|gm\.temperature_(edge|hotspot|mem)|hwmon\.in0|"
             r"vrm\.real_power|vrm\.vgfx\.(iout|vout)|fm\.thr\.(ppt0|tdc_gfx|vmax))$"],
+    "Network": [r"^net\.[^.]+\.(rx|tx|util|wifi\.signal)$", r"^net\.tcp\.retrans$"],
 }
 
 
