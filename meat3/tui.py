@@ -3,12 +3,15 @@
     meat3-tui [--socket PATH] [--interval 1.0]
 
 Views: 1 Overview  2 Sensors  3 Cores  4 Overclock      (Tab / Shift-Tab to cycle)
-Keys:  ↑↓ PgUp PgDn Home End scroll   / filter (Sensors)   Enter set control (Overclock)
-       o toggle OSD   r reset min/max/avg   q quit
+Keys:  ↑↓ PgUp PgDn Home End move   / filter (Sensors)   Enter set control (Overclock)
+       a pin / unpin a sensor on the Overview   g pin as graph, or switch value <-> graph
+       x unpin   [ ] reorder (Overview)   o toggle OSD   r reset min/max/avg   q quit
+Pinned sensors are kept in ~/.config/meat3/tui.json.
 """
 from __future__ import annotations
 
 import argparse
+import collections
 import curses
 import json
 import locale
@@ -22,6 +25,52 @@ from meat3.core.fmt import NONE_TEXT, format_value
 
 VIEWS = ["Overview", "Sensors", "Cores", "Overclock"]
 BLOCKS = " ▏▎▍▌▋▊▉█"
+VBLOCKS = " ▁▂▃▄▅▆▇█"
+GRAPH_H = 3             # rows per pinned graph
+HISTORY = 300           # samples kept per sensor for graphs (5 min at the default 1 s refresh)
+
+
+def pins_path() -> str:
+    return os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "meat3", "tui.json")
+
+
+def load_pins(path: str) -> list[dict]:
+    """[{"id": sensor id, "graph": bool}, ...] from tui.json; [] if missing or unreadable."""
+    try:
+        with open(path) as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return []
+    pins = d.get("pins") if isinstance(d, dict) else None
+    return [{"id": p["id"], "graph": bool(p.get("graph"))} for p in pins or []
+            if isinstance(p, dict) and isinstance(p.get("id"), str)]
+
+
+def save_pins(path: str, pins: list[dict]) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({"pins": pins}, f, indent=1)
+    os.replace(tmp, path)
+
+
+def graph_rows(vals, width: int, height: int, lo: Optional[float] = None, hi: Optional[float] = None) -> list[str]:
+    """Bar chart of the last `width` values, `height` rows tall, newest on the right (None = gap).
+    lo/hi fix the scale; otherwise it fits the values shown."""
+    vals = list(vals)[-width:] if width > 0 else []
+    vals = [None] * (width - len(vals)) + vals
+    nums = [v for v in vals if v is not None]
+    if lo is None:
+        lo = min(nums) if nums else 0.0
+    if hi is None:
+        hi = max(nums) if nums else 1.0
+    if hi - lo < 1e-9:                        # flat line: draw it at half height
+        pad = abs(lo) * 0.1 or 1.0
+        lo, hi = lo - pad, hi + pad
+    levels = height * 8
+    lv = [None if v is None else max(1, min(levels, round((v - lo) / (hi - lo) * levels))) for v in vals]
+    return ["".join(" " if l is None else VBLOCKS[max(0, min(8, l - (height - 1 - r) * 8))] for l in lv)
+            for r in range(height)]
 
 # ----------------------------------------------------------------------------- data
 
@@ -211,10 +260,13 @@ def overview_rows(p: str, order: list[str], sensors: dict) -> list[tuple]:
 
 
 class Tui:
-    def __init__(self, scr, client: Client, interval: float):
+    def __init__(self, scr, client: Client, interval: float, pins_file: Optional[str] = None):
         self.scr = scr
         self.c = client
         self.interval = interval
+        self.pins_file = pins_file or pins_path()
+        self.pins = load_pins(self.pins_file)
+        self.hist: dict[str, collections.deque] = {}
         self.view = 0
         self.sensors: dict[str, dict] = {}
         self.order: list[str] = []
@@ -307,6 +359,9 @@ class Tui:
         for s in snap.get("sensors", []):
             self.sensors[s["id"]] = s
             self.order.append(s["id"])
+            v = s.get("value")      # every sensor, so a newly pinned graph has history straight away
+            self.hist.setdefault(s["id"], collections.deque(maxlen=HISTORY)).append(
+                v if isinstance(v, (int, float)) and not isinstance(v, bool) else None)
         self.controls = snap.get("controls", [])
         self.poll_ms = snap.get("poll_ms")
         self.osd = osd.get("enabled")
@@ -387,8 +442,9 @@ class Tui:
                f"{time.strftime('%H:%M:%S')} "
         self.put(0, max(x, w - len(info)), info, self.cp["head"])
         body_h = h - 2
-        keys = {0: "Tab views  o OSD  h hotkey  r reset stats  u update  q quit",
-                1: "↑↓ PgUp/PgDn scroll  / filter  Esc clear  o OSD  r reset  u update  q quit",
+        keys = {0: ("↑↓ select pin  g graph/value  x unpin  [ ] move  a add  " if self.pins else
+                    "a add sensors  ") + "Tab views  o OSD  h hotkey  r reset  u update  q quit",
+                1: "↑↓ PgUp/PgDn move  a pin to Overview  g pin as graph  / filter  Esc clear  o OSD  q quit",
                 2: "↑↓ scroll  o OSD  r reset  u update  q quit",
                 3: "↑↓ select  Enter set value  o OSD  u update  q quit"}[self.view]
         status = self.msg if self.msg and time.time() - self.msg_t < 6 else keys
@@ -414,8 +470,59 @@ class Tui:
     def _panel_rows(self, p: str) -> list[tuple]:
         return overview_rows(p, self.order, self.sensors)
 
+    def _pin_label(self, sid: str) -> str:
+        s = self.sensors.get(sid)
+        if not s:
+            return sid
+        dev = s.get("group", "").split("/")[0].split(":")[0]       # "GPU 0: RTX 5080" -> "GPU 0"
+        return f"{dev} · {s.get('label', sid)}" if dev else s.get("label", sid)
+
+    def draw_pins(self, top, height) -> int:
+        """Pinned panel across the full width; returns the rows used."""
+        h, w = self.scr.getmaxyx()
+        self.sel[0] = max(0, min(self.sel[0], len(self.pins) - 1))
+        tall = lambda p: 1 + (GRAPH_H if p["graph"] and p["id"] in self.sensors else 0)
+        need = 2 + sum(tall(p) for p in self.pins)
+        ph = min(need, height)
+        if ph < 3:
+            return 0
+        self.box(top, 0, ph, w - 1, "Pinned")
+        y, inner = top + 1, w - 5
+        for i, p in enumerate(self.pins):
+            rows = tall(p)
+            if y + rows > top + ph - 1:
+                self.put(top + ph - 1, w - 16, " more below… ", self.cp["dim"])
+                break
+            s = self.sensors.get(p["id"])
+            lab = self._pin_label(p["id"])
+            lw = max(16, min(48, inner - 44))
+            tw = w - 3 - (17 + lw)                    # room left of the right border
+            self.put(y, 2, lab[:lw].ljust(lw), (curses.A_REVERSE if i == self.sel[0] else 0) | self.cp["dim"])
+            self.put(y, 3 + lw, fv(s).rjust(12), (self.sev_attr[severity(s)] or self.cp["title"]) if s else self.cp["dim"])
+            if not s:
+                self.put(y, 17 + lw, "not reported by the daemon right now", self.cp["dim"], tw)
+            elif p["graph"]:
+                vals = [v for v in self.hist.get(p["id"], ()) if v is not None][-inner:]
+                if vals:
+                    span = min(len(self.hist.get(p["id"], ())), inner) * self.interval
+                    rng = " – ".join(format_value(v, s.get("decimals", 0), s.get("unit", "")) for v in (min(vals), max(vals)))
+                    when = f"{span / 60:.0f} min" if span >= 60 else f"{span:.0f} s"
+                    self.put(y, 17 + lw, f"{rng}  over the last {when}", self.cp["dim"], tw)
+                pct = s.get("unit") == "%"
+                g = graph_rows(self.hist.get(p["id"], ()), inner, GRAPH_H, 0.0 if pct else None, 100.0 if pct else None)
+                sev = severity(s)
+                for r, line in enumerate(g):
+                    self.put(y + 1 + r, 3, line, self.sev_attr[sev] if sev else self.cp["bar2"])
+            else:
+                self.put(y, 17 + lw, f"min {fv(s, 'min')}  max {fv(s, 'max')}  avg {fv(s, 'avg')}", self.cp["dim"], tw)
+            y += rows
+        return ph
+
     def draw_overview(self, top, height):
         h, w = self.scr.getmaxyx()
+        if self.pins:
+            used = self.draw_pins(top, max(0, height - 4))
+            top, height = top + used, height - used
         devs = [(p, t, self._panel_rows(p)) for p, t in self._devices()]
         devs = [d for d in devs if d[2]]
         cols = 2 if w >= 110 else 1
@@ -491,7 +598,17 @@ class Tui:
             hdr = f"Sensor  [filter: {self.filter}]".ljust(lw) + hdr[lw:]
         self.put(top, 1, hdr, self.cp["dim"] | curses.A_UNDERLINE)
         n = height - 1
+        # the cursor moves over sensor rows only; keep it on screen
+        srows = [i for i, ln in enumerate(lines) if ln[0] == "s"]
+        self.sel[1] = max(0, min(self.sel[1], len(srows) - 1))
+        cur = srows[self.sel[1]] if srows else -1
+        if cur >= 0:
+            if cur < self.scroll[1] + 1:
+                self.scroll[1] = max(0, cur - 1)          # also show the group header above
+            elif cur >= self.scroll[1] + n:
+                self.scroll[1] = cur - n + 1
         self.scroll[1] = max(0, min(self.scroll[1], max(0, len(lines) - n)))
+        pinned = {p["id"]: p["graph"] for p in self.pins}
         for i, ln in enumerate(lines[self.scroll[1]: self.scroll[1] + n]):
             y = top + 1 + i
             if ln[0] == "g":
@@ -501,11 +618,16 @@ class Tui:
                 continue
             s = ln[1]
             depth = s.get("group", "").count("/") + 1
-            self.put(y, 1 + 2 * depth, s.get("label", "")[: lw - 2 * depth - 1], 0)
+            if self.scroll[1] + i == cur:
+                self.put(y, 0, " " * (w - 1), curses.A_REVERSE)
+            mark = {True: "▁▃▅", False: "•"}.get(pinned.get(s["id"]), "")
+            self.put(y, 1 + 2 * depth, s.get("label", "")[: lw - 2 * depth - 5] + (f" {mark}" if mark else ""),
+                     curses.A_REVERSE if self.scroll[1] + i == cur else 0)
             sev = self.sev_attr[severity(s)]
             for j, key in enumerate(("value", "min", "max", "avg")):
                 a = sev if key == "value" else (self.sev_attr[severity(s, s.get(key))] or self.cp["dim"])
-                self.put(y, 1 + lw + j * cw, fv(s, key).rjust(cw), a or self.cp["title"])
+                self.put(y, 1 + lw + j * cw, fv(s, key).rjust(cw),
+                         (a or self.cp["title"]) | (curses.A_REVERSE if self.scroll[1] + i == cur else 0))
         if len(lines) > n:
             pos = f" {self.scroll[1] + 1}-{min(len(lines), self.scroll[1] + n)} of {len(lines)} "
             self.put(h - 1, w - len(pos) - 1, pos, self.cp["dim"])
@@ -708,6 +830,52 @@ class Tui:
         except (OSError, ValueError) as e:
             self.flash(f"apply failed: {e}")
 
+    # ---- pinned sensors
+    def _save_pins(self):
+        try:
+            save_pins(self.pins_file, self.pins)
+        except OSError as e:
+            self.flash(f"couldn't save pins to {self.pins_file}: {e}")
+
+    def _cursor_sensor(self) -> Optional[dict]:
+        rows = [ln[1] for ln in self._sensor_lines() if ln[0] == "s"]
+        return rows[min(self.sel[1], len(rows) - 1)] if rows else None
+
+    def pin_key(self, graph: bool):
+        """Sensors view: a = pin/unpin as a value; g = pin as a graph, or switch a pin between value and graph."""
+        s = self._cursor_sensor()
+        if not s:
+            return
+        p = next((p for p in self.pins if p["id"] == s["id"]), None)
+        name = s.get("label", s["id"])
+        if p is None:
+            self.pins.append({"id": s["id"], "graph": graph})
+            self.flash(f"pinned {name} to the Overview" + (" as a graph" if graph else ""))
+        elif graph:
+            p["graph"] = not p["graph"]
+            self.flash(f"{name}: shown as a {'graph' if p['graph'] else 'value'}")
+        else:
+            self.pins.remove(p)
+            self.flash(f"unpinned {name}")
+        self._save_pins()
+
+    def pin_edit(self, ch):
+        """Overview: change the selected pin."""
+        if not self.pins:
+            return
+        i = self.sel[0] = max(0, min(self.sel[0], len(self.pins) - 1))
+        if ch == "g":
+            self.pins[i]["graph"] = not self.pins[i]["graph"]
+        elif ch in ("x", curses.KEY_DC):
+            self.flash(f"unpinned {self._pin_label(self.pins.pop(i)['id'])}")
+            self.sel[0] = max(0, min(i, len(self.pins) - 1))
+        elif ch in ("[", "]"):
+            j = i + (-1 if ch == "[" else 1)
+            if 0 <= j < len(self.pins):
+                self.pins[i], self.pins[j] = self.pins[j], self.pins[i]
+                self.sel[0] = j
+        self._save_pins()
+
     def key(self, ch) -> bool:
         v = self.view
         if ch in ("q", "Q"):
@@ -734,10 +902,17 @@ class Tui:
             self.update_key()
         elif ch == "h":
             self.hotkey_key()
+        elif ch in ("a", "g") and v == 1:
+            self.pin_key(graph=ch == "g")
+        elif ch == "a" and v == 0:
+            self.view = 1
+            self.flash("pick a sensor: a pins it as a value, g as a graph (/ to search)")
+        elif ch in ("g", "x", "[", "]", curses.KEY_DC) and v == 0:
+            self.pin_edit(ch)
         elif ch == "/" and v == 1:
             f = self.prompt("filter: ", self.filter)
             if f is not None:
-                self.filter, self.scroll[1] = f, 0
+                self.filter, self.scroll[1], self.sel[1] = f, 0, 0
         elif ch == "\x1b" and v == 1:
             self.filter = ""
         elif ch in ("\n", "\r", curses.KEY_ENTER) and v == 3:
@@ -750,6 +925,10 @@ class Tui:
             if delta is not None:
                 if v == 3:
                     self.sel[3] = max(0, min(len(self.controls) - 1, self.sel[3] + delta))
+                elif v == 1:
+                    self.sel[1] = max(0, self.sel[1] + delta)       # clamped when drawn
+                elif v == 0:
+                    self.sel[0] = max(0, min(len(self.pins) - 1, self.sel[0] + delta))
                 else:
                     self.scroll[v] = max(0, self.scroll[v] + delta)
         return True

@@ -77,7 +77,7 @@ sudo python3 -m meat3.daemon --once                           # real hardware: p
 ## Tests
 
 ```sh
-python3 -m unittest discover -s tests                         # 207 tests, a few seconds
+python3 -m unittest discover -s tests                         # 213 tests, a few seconds
 QT_QPA_PLATFORM=offscreen python3 tests/test_gui_smoke.py     # GUI smoke test
 ```
 

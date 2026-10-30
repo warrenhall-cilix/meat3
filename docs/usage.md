@@ -100,7 +100,7 @@ meat3-tui --interval 2     # refresh every 2 s
 
 | Key | Action |
 |---|---|
-| `1` | Overview: per-device panels with bars |
+| `1` | Overview: your pinned sensors, then per-device panels with bars |
 | `2` | Sensors: everything, with min/max/avg. `/` filters |
 | `3` | Cores: per-core table and L3 by program |
 | `4` | Overclock: select a control and press Enter. Risky values ask you to type `yes` |
@@ -110,6 +110,37 @@ meat3-tui --interval 2     # refresh every 2 s
 | `r` | Reset min/max/avg |
 | `u` | Check for and install updates |
 | `q` | Quit |
+
+### Pinning sensors to the Overview
+
+**Adding a sensor:**
+1. On the Sensors view (`2`), move to a sensor with ↑↓. `/` searches.
+2. Press `a` to pin it to the Overview as a value (current, min, max, avg), or `g` to pin it as a
+   graph.
+
+**Changing a pin:**
+- From the Sensors view: `a` on a pinned sensor unpins it, and `g` switches it between value and
+  graph.
+- In the Sensor list, pinned sensors are marked `•` (value) or `▁▃▅` (graph).
+
+**On the Overview:**
+
+| Key | Action |
+|---|---|
+| ↑↓ | Select a pin |
+| `g` | Switch the selected pin between value and graph |
+| `x` | Unpin |
+| `[` `]` | Move up or down |
+| `a` | Jump to the Sensors view to add more |
+
+**About the graphs:**
+- They cover the last few minutes, as many samples as fit across the terminal (up to 5 minutes at
+  the default refresh).
+- Percentages use a fixed 0–100 scale; anything else scales to fit.
+- History is kept from when the TUI started, for every sensor, so a newly pinned graph is already
+  filled in.
+
+Pins are saved in `~/.config/meat3/tui.json`, separately for each user.
 
 ## Web UI (`meat3-web`)
 
