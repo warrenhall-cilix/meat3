@@ -36,7 +36,7 @@ import sys
 import time
 from typing import Callable, Optional
 
-from meat3 import ccdtest, cpumap, cpuvalidate
+from meat3 import ccdtest, coallcore, cpumap, cpuvalidate
 
 STORE = "/var/lib/meat3/bin"
 SOCK = "/run/meat3/meat3.sock"
@@ -409,6 +409,7 @@ def report(res: dict) -> str:
         L += cpumap.report_lines(res, ccd)
         L += cpuvalidate.report_lines(res, ccd)
         L += ccdtest.report_lines(res, ccd)
+        L += coallcore.report_lines(res, ccd)
     return "\n".join(L)
 
 
@@ -594,6 +595,58 @@ class DaemonOc:
 
     def freq_core(self, k: int, mhz: int) -> None:
         self._apply(f"oc_freq_core{k}", int(mhz))
+
+
+# ----------------------------------------------------------------------------- PBO + CO per CCD, all-core
+def run_co_allcore(args, res: dict, b: "Binner", d: Daemon) -> int:
+    from meat3 import ccdtest, coallcore, cotune
+    miss = cpuvalidate.tools_missing()
+    if miss:
+        print("needs " + ", ".join(miss))
+        return 2
+    ctl = d.controls()
+    if not (ctl.get(f"{b.p}.smu.co_core0") or {}).get("available"):
+        print("per-core Curve Optimizer isn't available (needs ryzen_smu and meat3d with amd_smu_controls)")
+        return 2
+    if (ctl.get(f"{b.p}.smu.oc_mode") or {}).get("value"):
+        print("manual overclocking mode is on: switch it off (or reboot) first; this test uses Precision Boost")
+        return 2
+    sens = d.sensors()
+    stock = {k: round(_val(sens, f"{b.p}.pmt.{k}") or dflt) for k, dflt in
+             (("ppt_limit", 200), ("tdc_limit", 160), ("edc_limit", 225))}
+    test = {"ppt_limit": args.pbo_ppt, "tdc_limit": args.pbo_tdc, "edc_limit": args.pbo_edc}
+    res.setdefault("map", {}).setdefault("co_allcore", {}).setdefault("stock_limits", stock)
+    stock = res["map"]["co_allcore"]["stock_limits"]   # what was there before the first (maybe crashed) run
+
+    def apply(cid, v):
+        r = d.call({"cmd": "apply", "id": f"{b.p}.smu.{cid}", "value": v})
+        if not r.get("ok"):
+            raise RuntimeError(f"{cid} = {v}: {r.get('msg')}")
+
+    def set_limits(lim):
+        for k, v in lim.items():
+            apply(k, int(v))
+    d2 = Daemon()
+
+    def sensors():
+        return {x["id"]: x["value"] for x in d2.call({"cmd": "snapshot"}).get("sensors", [])}
+    groups = {str(c["ccd"]): c["cores"] for c in b.sys.ccds}
+    km = cotune.Kmsg()
+    suite = lambda cpu: cpumap.stress_suite(cpu, 60, cotune.stress, km.bad_lines)
+    t = coallcore.CoAllcore(res, b.sys, lambda k, v: apply(f"co_core{k}", int(v)), set_limits, test, stock,
+                            cpuvalidate.run_phase, km.bad_lines,
+                            lambda cores: ccdtest.Sampler(sensors, cores, b.p, groups=groups), suite,
+                            lambda: save(res), step=args.step, floor=args.co_floor, phase_s=args.co_phase_s)
+    try:
+        note = t.recover()
+        if note:
+            print("!!", note)
+        print(f"== PBO + Curve Optimizer per CCD under all-core load: limits {test} for the test (stock {stock}), "
+              f"CO in steps of {args.step} down to {args.co_floor}, {', '.join(coallcore.PHASES)} {args.co_phase_s} s each")
+        t.run()
+    finally:
+        km.close()
+    return 0
 
 
 # ----------------------------------------------------------------------------- all-core per CCD
@@ -788,6 +841,10 @@ def run(args) -> int:
                     except Exception:
                         pass
             save(res)
+        if args.co_allcore:
+            rc = run_co_allcore(args, res, b, d)
+            if rc != 0:
+                return rc
         if args.allcore:
             rc = run_allcore(args, res, b, d)
             if rc != 0:
@@ -796,7 +853,7 @@ def run(args) -> int:
             rc = run_map(args, res, b, d)
             if rc != 0:
                 return rc
-        if not args.co and not args.boost and not args.map and not args.at_voltage and not args.allcore:
+        if not (args.co or args.boost or args.map or args.at_voltage or args.allcore or args.co_allcore):
             print("== fused data")
             res["fused"] = b.fused()
             if any(res["fused"]["co_at_start"].values()):
@@ -847,6 +904,13 @@ def main(argv=None) -> int:
     ap.add_argument("--cc-step", type=int, default=100, help="--allcore: clock step, MHz (default 100)")
     ap.add_argument("--cc-phase-s", type=int, default=180, help="--allcore: seconds per test per step (default 180)")
     ap.add_argument("--cc-chip-s", type=int, default=600, help="--allcore: seconds per whole-chip test (default 600)")
+    ap.add_argument("--co-allcore", action="store_true",
+                    help="PBO + Curve Optimizer per CCD tuned under all-core load, then checked per core (hours)")
+    ap.add_argument("--co-phase-s", type=int, default=300, help="--co-allcore: seconds per test per step (default 300)")
+    ap.add_argument("--co-floor", type=int, default=-40, help="--co-allcore: most negative CO (default -40)")
+    ap.add_argument("--pbo-ppt", type=int, default=350, help="--co-allcore: PPT during the test, W (default 350)")
+    ap.add_argument("--pbo-tdc", type=int, default=300, help="--co-allcore: TDC during the test, A (default 300)")
+    ap.add_argument("--pbo-edc", type=int, default=350, help="--co-allcore: EDC during the test, A (default 350)")
     ap.add_argument("--validate", action="store_true",
                     help="--at-voltage V --manual: prove the screened clocks with Prime95 and y-cruncher per core, "
                          "then the whole chip (hours)")

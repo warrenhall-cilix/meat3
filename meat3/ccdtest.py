@@ -29,8 +29,10 @@ OTHERS_MHZ = 3000
 class Sampler:
     """Samples the daemon every few seconds during a test: lowest VDDCR, peak temperature/power, mean clock."""
 
-    def __init__(self, sensors: Callable[[], dict], cores: list[int], prefix: str = "cpu0", every: float = 5.0):
+    def __init__(self, sensors: Callable[[], dict], cores: list[int], prefix: str = "cpu0", every: float = 5.0,
+                 groups: Optional[dict] = None):
         self.sensors, self.cores, self.p, self.every = sensors, cores, prefix, every
+        self.groups = groups or {}                     # name -> cores: mean clock per group (per CCD)
         self.rows: list[dict] = []
         self._stop = threading.Event()
         self._t: Optional[threading.Thread] = None
@@ -42,9 +44,14 @@ class Sampler:
             return
         clks = [s.get(f"{self.p}.core{k}.clk_eff") for k in self.cores]
         clks = [c for c in clks if c]
+        grp = {}
+        for name, cores in self.groups.items():
+            cs = [s.get(f"{self.p}.core{k}.clk_eff") for k in cores]
+            cs = [c for c in cs if c]
+            grp[name] = sum(cs) / len(cs) if cs else None
         self.rows.append({"vddcr": s.get(f"{self.p}.pmt.vddcr_cpu"), "tctl": s.get(f"{self.p}.k10temp.temp1"),
                           "ppt": s.get(f"{self.p}.pmt.ppt"), "clk": sum(clks) / len(clks) if clks else None,
-                          "oc": s.get("_oc_mode")})
+                          "oc": s.get("_oc_mode"), "grp": grp})
 
     def _loop(self) -> None:
         while not self._stop.wait(self.every):
@@ -63,9 +70,13 @@ class Sampler:
 
     def summary(self) -> dict:
         g = lambda k: [r[k] for r in self.rows if r.get(k) is not None]
+        ccd = {}
+        for name in self.groups:
+            xs = [r["grp"].get(name) for r in self.rows[1:] or self.rows if r.get("grp", {}).get(name)]
+            ccd[name] = sum(xs) / len(xs) if xs else None    # skip the first sample: load still ramping
         return {"vddcr_min": min(g("vddcr")) if g("vddcr") else None, "tctl_max": max(g("tctl")) if g("tctl") else None,
                 "ppt_max": max(g("ppt")) if g("ppt") else None,
-                "clk_mean": sum(g("clk")) / len(g("clk")) if g("clk") else None}
+                "clk_mean": sum(g("clk")) / len(g("clk")) if g("clk") else None, "ccd_clk": ccd}
 
 
 class CcdTest:
