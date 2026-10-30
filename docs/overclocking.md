@@ -162,3 +162,56 @@ logs why.
 **Quick results aren't proven stable:** a value that passes 60-second steps can still fail in real
 use. Before relying on the results day to day, follow up with long `--step-time` runs and
 `--verify-all`.
+
+## Binning a CPU per CCD (`meat3-bin`)
+
+Measures a Ryzen CPU one CCD at a time so that two chips can be compared. On X3D chips with two
+CCDs, you get separate figures for the V-Cache CCD and the frequency CCD.
+
+**Running it:** put chip A in and run it, then swap to chip B and run it with `--label B`. Keep the
+board, BIOS settings, cooler and RAM the same for both. Then compare them.
+
+```sh
+sudo meat3-bin --label A              # fused data, boost clocks, voltage/frequency curve (~15 min)
+sudo meat3-bin --label A --co         # add the per-core Curve Optimizer search (hours)
+sudo meat3-bin --label A --boost      # boost clocks again with the Curve Optimizer results applied
+meat3-bin --report A
+meat3-bin --compare A B
+```
+
+It needs `stress-ng`. Results are saved in `/var/lib/meat3/bin/<label>.json`.
+
+**What each CCD gets:**
+
+| Measurement | How |
+|---|---|
+| Fused data | Per-core boost limit from the SMU, CPPC preferred-core rank and highest perf, L3 size |
+| Best frequency | The clock each core reaches running one thread on its own, and the clock the CCD holds with every core loaded, with voltage, power and temperature at that point |
+| Voltage/frequency curve | The frequency limit is lowered step by step, and the voltage the best core (then the whole CCD) asks for is recorded against the clock it actually runs. Lower voltage at the same clock means better silicon |
+| Curve Optimizer (`--co`) | The most negative stable value per core, using `meat3-cotune`. With `--boost`, the clocks reached with those values |
+
+**Safety:** the default run only ever lowers clocks, so it can't make the system unstable. If the
+CPU reaches 95 °C, it stops. The frequency limits are restored when it finishes, or if it's
+interrupted.
+
+**Before you start:**
+- **BIOS:** set it to stock or PBO, with Curve Optimizer at 0.
+- **No fixed multiplier:** a fixed all-core multiplier makes the CPU ignore frequency limits.
+  `meat3-bin` detects this and says so.
+- **Same settings for both chips:** for a fair comparison, use the same Curve Optimizer and PBO
+  settings for both. If you use PBO's boost override, set the same amount on both.
+
+**How the verdict is decided:** for each CCD, `--compare` compares these, mostly in this order:
+- the voltage both chips need at the same clocks (the main measure);
+- the Curve Optimizer depth;
+- the clocks reached.
+
+It warns if the board or BIOS differed between the two runs, or if either chip was on a fixed
+multiplier.
+
+**Running Curve Optimizer on both chips:** `--co` stores its progress in `meat3-cotune`'s state.
+Before running `--co` on the second chip, clear the first chip's results with
+`sudo meat3-cotune --reset`. `meat3-bin` refuses to mix them up.
+
+**Not yet tested on a dual-CCD chip.** It has been checked on a 9800X3D. On the first dual-CCD
+chip, check the report's CCD layout and per-core readings before relying on the verdict.

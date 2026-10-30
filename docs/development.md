@@ -14,6 +14,7 @@ meat3/
   cotune.py    meat3-cotune
   gputune.py   meat3-gputune
   skutable.py  meat3-skutable
+  cpubin.py    meat3-bin
 kmod/          meat3_smu (RDNA4 metrics) and the custom SKU amdgpu patch
 packaging/     installer, updater, systemd units, default config, Grafana dashboard
 tools/         dashboard generator, RDNA4 helpers, screenshot and validation scripts
@@ -77,7 +78,7 @@ sudo python3 -m meat3.daemon --once                           # real hardware: p
 ## Tests
 
 ```sh
-python3 -m unittest discover -s tests                         # 213 tests, a few seconds
+python3 -m unittest discover -s tests                         # 221 tests, a few seconds
 QT_QPA_PLATFORM=offscreen python3 tests/test_gui_smoke.py     # GUI smoke test
 ```
 

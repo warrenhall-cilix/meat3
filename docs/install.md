@@ -22,8 +22,8 @@ cd meat3
 
 It does the following:
 - **Program files:** copies meat³ to `/opt/meat3` and creates the commands in `/usr/local/bin`:
-  `meat3`, `meat3d`, `meat3-tui`, `meat3-web`, `meat3-cotune`, `meat3-gputune` and
-  `meat3-skutable`.
+  `meat3`, `meat3d`, `meat3-tui`, `meat3-web`, `meat3-cotune`, `meat3-gputune`,
+  `meat3-skutable` and `meat3-bin`.
 - **Daemon:** installs and starts `meat3d.service`.
 - **Group:** creates the `meat3` group and adds you to it. Log out and back in once for this to
   take effect.

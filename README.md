@@ -57,7 +57,7 @@ Installer options, optional kernel modules, updating and uninstalling are covere
 | [Using meat³](docs/usage.md) | Desktop app, TUI, themes, graphs |
 | [Sensors](docs/sensors.md) | What is read on each device and where it comes from |
 | [OSD](docs/osd.md) | Hotkey, desktop overlay, in-game display with MangoHud |
-| [Overclocking](docs/overclocking.md) | Controls, permissions, safety guards, `meat3-cotune` |
+| [Overclocking](docs/overclocking.md) | Controls, permissions, safety guards, `meat3-cotune`, CPU binning with `meat3-bin` |
 | [RX 9070 / 9070 XT](docs/rdna4.md) | RDNA4 hidden metrics, VRM tools, `meat3-gputune`, `meat3-skutable` |
 | [Web UI and Prometheus](docs/web.md) | Read-only browser view, `/metrics`, Grafana dashboard |
 | [Configuration](docs/configuration.md) | Every key in `/etc/meat3/config.json` |

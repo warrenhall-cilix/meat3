@@ -18,7 +18,7 @@ if [[ "${1:-}" == "--uninstall" ]]; then
         sudo systemctl disable --now "$u" 2>/dev/null || true
     done
     sudo rm -rf "$PREFIX" /etc/systemd/system/meat3d.service /etc/systemd/system/meat3-web.service /usr/local/bin/meat3-web /usr/local/bin/meat3 /usr/local/bin/meat3d /usr/local/bin/meat3-cotune /usr/local/bin/meat3-tui \
-        /usr/local/bin/meat3-gputune /usr/local/bin/meat3-skutable /usr/share/applications/meat3.desktop /etc/modules-load.d/meat3-smu.conf
+        /usr/local/bin/meat3-gputune /usr/local/bin/meat3-skutable /usr/local/bin/meat3-bin /usr/share/applications/meat3.desktop /etc/modules-load.d/meat3-smu.conf
     if command -v dkms >/dev/null && dkms status meat3_smu 2>/dev/null | grep -q meat3_smu; then
         sudo dkms remove meat3_smu/0.1 --all || true
     fi
@@ -112,8 +112,12 @@ sudo tee /usr/local/bin/meat3-skutable >/dev/null <<EOF
 #!/bin/sh
 cd $PREFIX && exec /usr/bin/python3 -m meat3.skutable "\$@"
 EOF
+sudo tee /usr/local/bin/meat3-bin >/dev/null <<EOF
+#!/bin/sh
+cd $PREFIX && exec /usr/bin/python3 -m meat3.cpubin "\$@"
+EOF
 sudo chmod 755 /usr/local/bin/meat3-web /usr/local/bin/meat3 /usr/local/bin/meat3d /usr/local/bin/meat3-cotune /usr/local/bin/meat3-tui \
-    /usr/local/bin/meat3-gputune /usr/local/bin/meat3-skutable
+    /usr/local/bin/meat3-gputune /usr/local/bin/meat3-skutable /usr/local/bin/meat3-bin
 
 echo "== group 'meat3' (allowed to apply overclocks / change OSD)"
 getent group meat3 >/dev/null || sudo groupadd --system meat3
