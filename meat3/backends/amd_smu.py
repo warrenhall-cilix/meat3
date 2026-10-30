@@ -48,9 +48,9 @@ COMMANDS = {"GraniteRidge": GRANITE_RIDGE_CMDS}
 
 CO_MIN, CO_MAX = -50, 30          # conservative: SMU accepts +-50, BIOS UIs cap positive at +30
 LIMITS = {                         # control key -> (pm-table field, cmd, unit, min, max, scale to SMU units)
-    "ppt_limit": ("ppt_limit", "set_ppt", "W", 35, 300, 1000),
-    "tdc_limit": ("tdc_limit", "set_tdc", "A", 30, 250, 1000),
-    "edc_limit": ("edc_limit", "set_edc", "A", 30, 300, 1000),
+    "ppt_limit": ("ppt_limit", "set_ppt", "W", 35, 400, 1000),     # the CPU still holds its own 95 °C limit
+    "tdc_limit": ("tdc_limit", "set_tdc", "A", 30, 300, 1000),
+    "edc_limit": ("edc_limit", "set_edc", "A", 30, 350, 1000),
 }
 
 
