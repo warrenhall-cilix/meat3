@@ -790,6 +790,23 @@ def run_map(args, res: dict, b: "Binner", d: Daemon) -> int:
     return 0
 
 
+def clear_markers(res: dict) -> list[str]:
+    """Remove every 'step in progress' marker (they mean 'this step crashed' to the next run)."""
+    m = res.get("map") or {}
+    out = []
+    for key in ("current", "current_av"):
+        if m.pop(key, None) is not None:
+            out.append(key)
+    for sect in ("co_allcore",):
+        if (m.get(sect) or {}).pop("current", None) is not None:
+            out.append(sect)
+    for sect in ("allcore", "validate"):
+        for tag, r in (m.get(sect) or {}).items():
+            if isinstance(r, dict) and r.pop("current", None) is not None:
+                out.append(f"{sect} {tag}")
+    return out
+
+
 # ----------------------------------------------------------------------------- main
 def run(args) -> int:
     if os.geteuid() != 0:
@@ -868,7 +885,12 @@ def run(args) -> int:
             res["vf"] = b.vf(points=args.points)
             save(res)
     except KeyboardInterrupt:
-        print("\ninterrupted; frequency limits restored, partial results kept")
+        # stopped on purpose (Ctrl-C / systemctl stop): the step in progress didn't crash the PC, so don't let
+        # the next run mark it unstable; it is simply run again
+        cleared = clear_markers(res)
+        save(res)
+        print("\ninterrupted; limits restored, partial results kept"
+              + (f"; step in progress will run again ({', '.join(cleared)})" if cleared else ""))
         return 130
     except RuntimeError as e:
         print(f"\nstopped: {e}")

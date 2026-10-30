@@ -82,5 +82,14 @@ class CoAllcoreTest(unittest.TestCase):
         self.assertEqual(self.res["map"]["co_allcore"]["ccds"]["1"]["co"], -25)
 
 
+class MarkerTest(unittest.TestCase):
+    def test_clear_markers(self):
+        res = {"map": {"current_av": {"core": "1"}, "co_allcore": {"current": {"ccd": 0, "co": -5}},
+                       "allcore": {"1.250V": {"current": {"ccd": 1}}}, "validate": {"1.250V manual": {"cores": {}}}}}
+        self.assertEqual(sorted(cpubin.clear_markers(res)), ["allcore 1.250V", "co_allcore", "current_av"])
+        self.assertNotIn("current", res["map"]["co_allcore"])
+        self.assertEqual(cpubin.clear_markers(res), [])
+
+
 if __name__ == "__main__":
     unittest.main()
