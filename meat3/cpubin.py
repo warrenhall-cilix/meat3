@@ -217,13 +217,13 @@ class Binner:
                              "volt": statistics.mean(pick("volt")) if pick("volt") else None,
                              "power": sum(pick("power")) if pick("power") else None,
                              "temp": max(pick("temp") + ([tctl] if tctl is not None else [])) if pick("temp") or tctl else None,
-                             "ppt": _val(s, f"{self.p}.pmt.ppt")})
+                             "ppt": _val(s, f"{self.p}.pmt.ppt"), "vddcr": _val(s, f"{self.p}.pmt.vddcr_cpu")})
                 if tctl is not None and tctl >= TEMP_ABORT_C:
                     raise RuntimeError(f"CPU at {tctl:.0f} °C: stopping (check the cooler)")
                 self.sleep(1.0)
         finally:
             ld.stop()
-        return {k: _median([r[k] for r in rows]) for k in ("clk", "volt", "power", "temp", "ppt")}
+        return {k: _median([r[k] for r in rows]) for k in ("clk", "volt", "power", "temp", "ppt", "vddcr")}
 
     def best_core(self, ccd: dict, sens: dict) -> int:
         rank = {k: _val(sens, f"{self.p}.core{k}.cppc_rank") for k in ccd["cores"]}
@@ -546,6 +546,41 @@ def collect_co(res: dict) -> None:
         res["co_params"] = st.get("params")
 
 
+# ----------------------------------------------------------------------------- manual mode through meat3d
+class DaemonOc:
+    """Manual overclocking through meat3d's controls (range checks, the overtemp guard)."""
+
+    def __init__(self, d: Daemon, prefix: str):
+        self.d, self.p = d, prefix
+
+    def _apply(self, cid: str, value) -> None:
+        r = self.d.call({"cmd": "apply", "id": f"{self.p}.smu.{cid}", "value": value})
+        if not r.get("ok"):
+            raise RuntimeError(f"{cid} = {value}: {r.get('msg')}")
+
+    def ready(self) -> str:
+        c = self.d.controls()
+        m = c.get(f"{self.p}.smu.oc_mode")
+        if not m or not m.get("available"):
+            return "manual overclocking isn't available: " + ((m or {}).get("hint") or "no control")[:160]
+        v = c.get(f"{self.p}.smu.oc_vid") or {}
+        if "--oc-probe" in (v.get("hint") or ""):
+            return "the voltage encoding isn't verified yet: run 'sudo meat3-bin --oc-probe' first"
+        return ""
+
+    def mode(self, on: bool) -> None:
+        self._apply("oc_mode", bool(on))
+
+    def vid(self, volts: float) -> None:
+        self._apply("oc_vid", round(volts, 3))
+
+    def freq_all(self, mhz: int) -> None:
+        self._apply("oc_freq_all", int(mhz))
+
+    def freq_core(self, k: int, mhz: int) -> None:
+        self._apply(f"oc_freq_core{k}", int(mhz))
+
+
 # ----------------------------------------------------------------------------- static V/F map
 def run_map(args, res: dict, b: "Binner", d: Daemon) -> int:
     from meat3 import cotune
@@ -567,7 +602,7 @@ def run_map(args, res: dict, b: "Binner", d: Daemon) -> int:
             if note:
                 print("!!", note)
         # with the voltage fixed in the BIOS, CO can't move it, so there's nothing to check (or to get wrong)
-        if not res["map"].get("mapping_ok") and not (args.at_voltage and args.fixed_voltage):
+        if not res["map"].get("mapping_ok") and not (args.at_voltage and (args.fixed_voltage or args.manual)):
             print("== checking the Curve Optimizer core numbering (one core per CCD)")
             sens = d.sensors()
             ok, why = mp.check_mapping([b.best_core(c, sens) for c in b.sys.ccds])
@@ -584,7 +619,15 @@ def run_map(args, res: dict, b: "Binner", d: Daemon) -> int:
                 return 2
             print(f"== highest stable clock per core at <= {args.at_voltage:.3f} V: {len(cores)} cores, from "
                   f"{args.av_start} MHz in {args.av_step} MHz steps, {args.step_time} s per step")
-            mp.run_at_voltage(cores, args.at_voltage, args.av_start, args.av_step, fixed=args.fixed_voltage)
+            if args.manual:
+                oc = DaemonOc(d, b.p)
+                why = oc.ready()
+                if why:
+                    print(f"stopped: {why}")
+                    return 2
+                mp.run_manual(cores, args.at_voltage, oc, args.av_start, args.av_step)
+            else:
+                mp.run_at_voltage(cores, args.at_voltage, args.av_start, args.av_step, fixed=args.fixed_voltage)
             return 0
         clocks = cpumap.parse_clocks(args.map_clocks)
         res["map"]["params"] = {"clocks": args.map_clocks, "step": args.step, "floor": args.map_floor,
@@ -699,6 +742,11 @@ def main(argv=None) -> int:
     ap.add_argument("--map-floor", type=int, default=-40, help="--map: most negative CO to try (default -40)")
     ap.add_argument("--at-voltage", type=float, metavar="V",
                     help="highest stable clock of every core at or below this voltage, e.g. 1.25 (hours)")
+    ap.add_argument("--manual", action="store_true",
+                    help="--at-voltage: use manual overclocking mode (fixed voltage and exact per-core clocks "
+                         "set through the SMU; needs a passed --oc-probe)")
+    ap.add_argument("--oc-probe", action="store_true",
+                    help="verify manual overclocking mode and its voltage encoding on this chip (run once, at idle)")
     ap.add_argument("--fixed-voltage", action="store_true",
                     help="--at-voltage: the voltage is set by hand in the BIOS; don't use Curve Optimizer")
     ap.add_argument("--av-start", type=int, default=5000, help="--at-voltage: first clock tried, MHz (default 5000)")
@@ -722,6 +770,12 @@ def main(argv=None) -> int:
     except (OSError, ValueError) as e:
         print(f"meat3-bin: {e}")
         return 1
+    if args.oc_probe:
+        if os.geteuid() != 0:
+            print("run as root: sudo meat3-bin --oc-probe")
+            return 2
+        from meat3 import ocprobe
+        return ocprobe.run_probe()
     if not args.label:
         ap.error("--label is required to measure a chip")
     try:

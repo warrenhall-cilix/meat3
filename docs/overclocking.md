@@ -215,3 +215,65 @@ Before running `--co` on the second chip, clear the first chip's results with
 
 **Not yet tested on a dual-CCD chip.** It has been checked on a 9800X3D. On the first dual-CCD
 chip, check the report's CCD layout and per-core readings before relying on the verdict.
+
+## Manual overclocking (Ryzen 9000)
+
+This is Ryzen Master's "manual mode", done through the SMU from Linux:
+- **Precision Boost is off** while it's on.
+- **One voltage** applies to the whole chip, because it has a single core-voltage rail.
+- **Each core** can be given its own frequency.
+
+Controls are under Overclock → CPU → Manual overclocking:
+- manual mode on or off;
+- core voltage (VID);
+- all-core frequency;
+- frequency per core.
+
+**Lasts until reboot.** A reboot always returns the CPU to normal boost.
+
+**One-off check first:** `sudo meat3-bin --oc-probe`, run once at idle.
+
+The SMU's voltage command doesn't say which encoding it expects. The newer SVI3 encoding and the older
+SVI2 one run in opposite directions, so a wrong guess would set the wrong voltage. The probe works on
+the chip itself:
+1. Enters manual mode.
+2. Sets every core to 4000 MHz.
+3. Moves one core alone, to check per-core clocks.
+4. Asks for 1.10 V, which is below what the chip already runs.
+5. Checks the chip's own voltage telemetry reads 1.10 V.
+6. Leaves manual mode.
+
+A wrong encoding would come out at about 0.5 V, so the worst case is a crash, never an overvolt. If
+the PC does crash, the next run of the probe reports where it stopped and keeps the voltage control
+locked.
+
+**Voltage control stays locked until the probe passes.** It locks again if the SMU firmware changes
+(after a BIOS update), until the probe is rerun.
+
+**Safety limits:**
+
+| Limit | Default | Where to change it |
+|---|---|---|
+| Voltage cap | 1.40 V | `manual_oc.max_vid`; 1.45 V is a hard limit that can't be raised |
+| Overtemperature guard | Leaves manual mode above 90 °C | The *Manual CPU overclock overtemp* guard |
+| Frequencies | 600–6500 MHz | Fixed |
+
+**Requested and delivered voltage:** the voltage you set is what the chip *requests* (VID). Under load
+the regulator *delivers* less, because of vdroop; the load-line calibration setting in the BIOS
+decides how much. Both show under CPU → SMU: *VDDCR_CPU VID* and *VDDCR_CPU (SVI3)*.
+
+**Highest clock per core at a fixed voltage:**
+
+```sh
+sudo meat3-bin --label A --at-voltage 1.25 --manual
+```
+
+How it works:
+1. Sets 1.25 V and puts every core at 3000 MHz.
+2. Takes one core at a time up from 5000 MHz in 100 MHz steps, running the stress suite at each
+   step.
+3. After the first failure, tries half a step above the last pass.
+4. Records each core's highest stable clock, with the requested and delivered voltage.
+5. Leaves manual mode at the end, or if anything goes wrong.
+
+`--compare` reports each CCD's mean, best and worst clock at that voltage.

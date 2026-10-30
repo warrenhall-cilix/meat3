@@ -33,7 +33,9 @@ HEAVY_METHODS = ["matrixprod", "fft", "int128decimal64", "double", "int64", "pri
 MAP_CLOCKS = "4500,5000,5300,max"
 CO_PROBE = -15                 # mapping check: this CO on one core must lower that core's voltage
 CO_PROBE_MIN_DROP_V = 0.015
-MV_PER_CO = 2.5                # measured on a 9950X3D: ~12.5 mV per 5 CO steps (only a starting guess)
+OTHERS_MANUAL_MHZ = 3000      # manual mode: every other core's clock while one core is tested
+MANUAL_MAX_MHZ = 6200         # manual mode: the test never asks for more than this
+MV_PER_CO = 2.5               # measured on a 9950X3D: ~12.5 mV per 5 CO steps (only a starting guess)
 FIXED_TOLERANCE_V = 0.05      # --fixed-voltage: measured voltage must be within this of the BIOS setting
 OTHERS_FRAC = 0.5             # other cores' limit while one core is mapped (~2.9 GHz on a 9950X3D)
 
@@ -302,6 +304,65 @@ class Mapper:
                 self.b.restore()
             r["done"] = True
             self.save()
+
+    def run_manual(self, cores: list[int], volt: float, oc, start_mhz: int = 5000, step_mhz: int = 100,
+                   others_mhz: int = OTHERS_MANUAL_MHZ) -> None:
+        """Manual mode: the voltage is fixed at `volt` and every core runs `others_mhz`, except the core under
+        test, which goes up `step_mhz` at a time until it fails. `oc` sets mode/vid/freq_all/freq_core."""
+        tag = f"{volt:.3f}V manual"
+        av = self.m.setdefault("at_voltage", {}).setdefault(tag, {})
+        oc.mode(True)
+        try:
+            oc.freq_all(others_mhz)
+            oc.vid(volt)
+            for k in cores:
+                r = av.setdefault(str(k), {"passes": []})
+                if r.get("done"):
+                    continue
+                cpu = self.cpus_of(k)[0]
+                f = (r["passes"][-1]["target"] + (step_mhz if r.get("fail") is None else step_mhz // 2)) \
+                    if r["passes"] else start_mhz
+                self.log(f"== core {k}: highest clock at {volt:.3f} V (manual), from {f} MHz")
+                try:
+                    while True:
+                        if r.get("fail") is not None and f >= r["fail"]:
+                            break
+                        if f > MANUAL_MAX_MHZ:
+                            r["ceiling"] = f
+                            self.log(f"   stopped at {MANUAL_MAX_MHZ} MHz (test limit)")
+                            break
+                        oc.freq_core(k, f)
+                        meas = self.b.measure([k], [cpu])
+                        if meas.get("clk") is None or abs(meas["clk"] - f) > 75:
+                            r["ceiling"] = f
+                            self.log(f"   {f} MHz: core runs {meas.get('clk') or 0:.0f} MHz instead: clock limit")
+                            break
+                        self.m["current_av"] = {"tag": tag, "core": str(k), "target": f, "co": 0}
+                        self.save()
+                        ok, why = self.suite(cpu)
+                        self.m.pop("current_av", None)
+                        if not ok:
+                            r["fail"], r["fail_reason"] = f, why
+                            self.log(f"   {f} MHz: FAIL - {why}")
+                            self.save()
+                            oc.freq_core(k, others_mhz)
+                            if r["passes"] and f - r["passes"][-1]["target"] > step_mhz // 2:
+                                f = r["passes"][-1]["target"] + step_mhz // 2
+                                continue
+                            break
+                        r["passes"].append({"target": f, "co": 0, "clk": meas.get("clk"), "volt": meas.get("volt"),
+                                            "vddcr": meas.get("vddcr"), "temp": meas.get("temp"),
+                                            "power": meas.get("power")})
+                        self.log(f"   {f} MHz: pass ({meas.get('clk') or 0:.0f} MHz, VID {meas.get('volt') or 0:.3f} V, "
+                                 f"VDDCR {meas.get('vddcr') or 0:.3f} V, {meas.get('temp') or 0:.0f} °C)")
+                        self.save()
+                        f += step_mhz if r.get("fail") is None else step_mhz // 2
+                finally:
+                    oc.freq_core(k, others_mhz)
+                r["done"] = True
+                self.save()
+        finally:
+            oc.mode(False)
 
     def recover_at_voltage(self) -> Optional[str]:
         cur = self.m.pop("current_av", None)

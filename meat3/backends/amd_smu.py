@@ -43,6 +43,13 @@ GRANITE_RIDGE_CMDS = {
     "set_ppt": ("mp1", 0x3E), "set_tdc": ("mp1", 0x3C), "set_edc": ("mp1", 0x3D),
     "set_co_core": ("mp1", 0x35), "set_co_all": ("mp1", 0x36),
     "get_co_core": ("rsmu", 0xD5),
+    # manual overclocking (Ryzen Master "manual mode"), ZenStates-Core Zen4Settings (Zen5 inherits):
+    # RSMU 0x5D EnableOcMode, 0x5E DisableOcMode, 0x5F SetOverclockFrequencyAllCores (MHz),
+    # 0x60 SetOverclockFrequencyPerCore (core mask | MHz), 0x61 SetOverclockCpuVid,
+    # 0x6F IsOverclockable (caps), 0x6D GetPBOScalar, 0x6E GetBoostLimitFrequency (reads)
+    "oc_enable": ("rsmu", 0x5D), "oc_disable": ("rsmu", 0x5E), "oc_freq_all": ("rsmu", 0x5F),
+    "oc_freq_core": ("rsmu", 0x60), "oc_vid": ("rsmu", 0x61),
+    "oc_caps": ("rsmu", 0x6F), "get_pbo_scalar": ("rsmu", 0x6D), "get_boost_limit": ("rsmu", 0x6E),
 }
 COMMANDS = {"GraniteRidge": GRANITE_RIDGE_CMDS}
 
@@ -52,6 +59,28 @@ LIMITS = {                         # control key -> (pm-table field, cmd, unit, 
     "tdc_limit": ("tdc_limit", "set_tdc", "A", 30, 300, 1000),
     "edc_limit": ("edc_limit", "set_edc", "A", 30, 350, 1000),
 }
+
+
+# Manual overclocking. The voltage control stays unavailable until `meat3-bin --oc-probe` has shown,
+# on this chip and SMU firmware, that the VID encoding below gives the voltage asked for: the SMU
+# doesn't say which encoding it expects, and SVI2 and SVI3 run in opposite directions (either mix-up
+# gives a *low* voltage, so the probe can crash the PC but not overvolt it).
+OC_VID_HARD_MAX = 1.45             # never sent, whatever the config says
+OC_FREQ_MIN, OC_FREQ_MAX = 600, 6500
+OC_STATE_FILE = "/run/meat3/oc_mode"   # tmpfs: cleared at boot, like the SMU's manual mode
+
+
+def vid_svi3(volts: float) -> int:
+    """SVI3 VID: V = 0.245 + 0.005 * vid (ZenStates Utils.VoltageToVidSVI3)."""
+    return max(0, min(0xFF, round((volts - 0.245) / 0.005)))
+
+
+def vid_svi3_volts(vid: int) -> float:
+    return round(0.245 + vid * 0.005, 3)
+
+
+def oc_core_mask(slot: int) -> int:
+    return ((slot // 8) << 28) | ((slot % 8) << 20)
 
 
 class SmuDisabled(Exception):
@@ -64,6 +93,8 @@ class RyzenSmu:
         self.env = os.environ if env is None else env
         self.error = ""
         self.co_cache: dict[int, Optional[int]] = {}   # slot -> last read/applied CO margin
+        self.oc_state_file = OC_STATE_FILE
+        self.oc_cache: dict[str, Any] = {}             # last applied manual-OC values (no SMU getters)
 
     def _p(self, n: str) -> str:
         return os.path.join(self.root, n)
@@ -105,6 +136,24 @@ class RyzenSmu:
 
     def read_pm_table(self) -> Optional[bytes]:
         return self._read_bin("pm_table")
+
+    # ------------------------------------------------------------ manual OC state
+    def oc_active(self) -> bool:
+        """Manual mode survives a daemon restart but not a reboot; the tmpfs marker tracks it the same way."""
+        return os.path.exists(self.oc_state_file)
+
+    def set_oc_active(self, on: bool) -> None:
+        try:
+            if on:
+                os.makedirs(os.path.dirname(self.oc_state_file), exist_ok=True)
+                with open(self.oc_state_file, "w") as f:
+                    f.write("1\n")
+            elif os.path.exists(self.oc_state_file):
+                os.unlink(self.oc_state_file)
+        except OSError:
+            pass
+        if not on:
+            self.oc_cache.clear()
 
     # ------------------------------------------------------------ mailbox (gated)
     def experimental(self) -> bool:
@@ -217,11 +266,116 @@ def smu_controls(smu: RyzenSmu, pmt, prefix: str, group: str, ncores: int) -> li
                            danger=2, available=avail,
                            hint=(reason + ". " if reason else "") + warn +
                            f" SetDldoPsmMargin, physical slot {s}; value read via GetDldoPsmMargin (RSMU 0xD5)."))
+    out += oc_controls(smu, pmt, prefix, group, ncores, reason)
     return out
+
+
+def oc_config() -> dict:
+    from meat3.core import config
+    return config.get().get("manual_oc") or {}
+
+
+def oc_vid_ready(smu: RyzenSmu) -> str:
+    """'' when the voltage control may be used, else why not."""
+    c = oc_config()
+    if c.get("vid_encoding") != "svi3":
+        return "voltage encoding not verified on this chip yet: run 'sudo meat3-bin --oc-probe'"
+    fw = smu.fw_version()
+    if c.get("verified_smu") and fw and c["verified_smu"] != fw:
+        return f"verified on SMU firmware {c['verified_smu']}, now {fw}: run 'sudo meat3-bin --oc-probe' again"
+    return ""
+
+
+def oc_controls(smu: RyzenSmu, pmt, prefix: str, group: str, ncores: int, reason: str) -> list[Control]:
+    g = f"{group}/Manual overclocking"
+    avail = not reason
+    on = smu.oc_active()
+    warn = ("Manual mode (like Ryzen Master's): Precision Boost is off and every core runs the clock you set, "
+            "at the voltage you set. Lost at reboot. The 'Manual CPU overclock overtemp' guard leaves "
+            "manual mode if Tctl passes 90 °C.")
+    out = [Control(f"{prefix}.smu.oc_mode", g, "Manual overclocking mode", "bool", on, default=False, danger=2,
+                   available=avail, hint=(reason + ". " if reason else "") + warn)]
+    vid_why = reason or oc_vid_ready(smu)
+    vmax = min(OC_VID_HARD_MAX, float(oc_config().get("max_vid", 1.40)))
+    out.append(Control(f"{prefix}.smu.oc_vid", g, "Core voltage (VID)", "float", smu.oc_cache.get("vid"),
+                       min=0.80, max=vmax, step=0.005, unit="V", danger=2, available=not vid_why and on,
+                       hint=(vid_why + ". " if vid_why else ("enable manual mode first. " if not on else ""))
+                       + "Requested voltage; the delivered VDDCR_CPU is lower under load (load line). "
+                         "SVI3 VID, 5 mV steps."))
+    out.append(Control(f"{prefix}.smu.oc_freq_all", g, "All-core frequency", "int", smu.oc_cache.get("freq_all"),
+                       min=OC_FREQ_MIN, max=OC_FREQ_MAX, step=25, unit="MHz", danger=2, available=avail and on,
+                       hint=(reason + ". " if reason else ("enable manual mode first. " if not on else ""))
+                       + "Sets every core; per-core values below override it."))
+    slots = (pmt.slots if pmt is not None and pmt.slots else list(range(ncores)))
+    for k, sl in enumerate(slots[:ncores]):
+        out.append(Control(f"{prefix}.smu.oc_freq_core{k}", g, f"Core {k} frequency", "int",
+                           smu.oc_cache.get(f"freq_core{k}"), min=OC_FREQ_MIN, max=OC_FREQ_MAX, step=25, unit="MHz",
+                           danger=2, available=avail and on,
+                           hint=(reason + ". " if reason else ("enable manual mode first. " if not on else ""))
+                           + f"SetOverclockFrequencyPerCore, physical slot {sl}."))
+    return out
+
+
+def oc_apply(smu: RyzenSmu, pmt, key: str, value: Any, ncores: int) -> tuple[bool, str]:
+    reason = _gate_reason(smu)
+    if reason:
+        return False, reason
+    if key == "oc_mode":
+        on = bool(value)
+        if not on and not smu.oc_active():
+            return True, "manual mode already off"
+        cmd = "oc_enable" if on else "oc_disable"
+        args = [0]
+    elif not smu.oc_active():
+        return False, "enable manual overclocking mode first"
+    elif key == "oc_vid":
+        why = oc_vid_ready(smu)
+        if why:
+            return False, why
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False, "value must be a number of volts"
+        vmax = min(OC_VID_HARD_MAX, float(oc_config().get("max_vid", 1.40)))
+        if not 0.80 <= float(value) <= vmax:
+            return False, f"{value} V outside 0.80..{vmax:.3f} V"
+        cmd, args = "oc_vid", [vid_svi3(float(value))]
+    elif key == "oc_freq_all" or (key.startswith("oc_freq_core") and key[12:].isdigit()):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value != int(value):
+            return False, "value must be whole MHz"
+        f = int(value)
+        if not OC_FREQ_MIN <= f <= OC_FREQ_MAX:
+            return False, f"{f} MHz outside {OC_FREQ_MIN}..{OC_FREQ_MAX}"
+        if key == "oc_freq_all":
+            cmd, args = "oc_freq_all", [f & 0xFFFFF]
+        else:
+            k = int(key[12:])
+            slots = (pmt.slots if pmt is not None and pmt.slots else list(range(ncores)))
+            if not 0 <= k < min(ncores, len(slots)):
+                return False, f"no core {k}"
+            cmd, args = "oc_freq_core", [oc_core_mask(slots[k]) | (f & 0xFFFFF)]
+    else:
+        return False, f"unknown SMU control {key}"
+    try:
+        st, _ = smu.send(cmd, args)
+    except (OSError, SmuDisabled, ValueError) as e:
+        return False, f"SMU {cmd} failed: {e}"
+    if st != SMU_OK:
+        return False, f"SMU {cmd} returned {st:#x} ({SMU_STATUS.get(st, '?')})"
+    if key == "oc_mode":
+        smu.set_oc_active(bool(value))
+    elif key == "oc_vid":
+        smu.oc_cache["vid"] = vid_svi3_volts(args[0])
+    elif key == "oc_freq_all":
+        smu.oc_cache = {k_: v_ for k_, v_ in smu.oc_cache.items() if not k_.startswith("freq_core")}
+        smu.oc_cache["freq_all"] = int(value)
+    else:
+        smu.oc_cache[key[3:]] = int(value)
+    return True, f"SMU {cmd} arg0={args[0]:#010x} OK"
 
 
 def smu_apply(smu: RyzenSmu, pmt, prefix: str, control_id: str, value: Any, ncores: int) -> tuple[bool, str]:
     key = control_id[len(prefix) + len(".smu."):]
+    if key.startswith("oc_"):
+        return oc_apply(smu, pmt, key, value, ncores)
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value != int(value):
         return False, "value must be an integer"
     v = int(value)

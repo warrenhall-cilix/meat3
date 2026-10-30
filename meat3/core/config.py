@@ -48,6 +48,10 @@ DEFAULTS = {
     # AMD Ryzen SMU overclocking (Curve Optimizer, PBO PPT/TDC/EDC) via ryzen_smu.
     # Validated on Granite Ridge (9800X3D): CO all/per-core write+readback+stress, PPT write+readback.
     "amd_smu_controls": True,
+    # Manual overclocking through the SMU (Ryzen Master's manual mode). vid_encoding stays null until
+    # `meat3-bin --oc-probe` has verified it on this chip ("svi3"), with the SMU firmware it was verified
+    # on; the voltage control is locked until then. max_vid caps the voltage control (hard cap 1.45 V).
+    "manual_oc": {"vid_encoding": None, "verified_smu": None, "max_vid": 1.40},
     # Controls applied when meat3d starts, e.g. {"cpu0.smu.co_core0": -20} (meat3-cotune --save-boot).
     "apply_on_start": {},
     # Safety guards evaluated by the daemon every poll. sensor: glob on sensor id ("*" wildcard),
@@ -59,6 +63,9 @@ DEFAULTS = {
          "control": "nv*.oc.power_limit", "value": 300, "enabled": True},
         {"name": "GPU memory overtemp", "sensor": "nv*.t.mem", "above": 95, "count": 3,
          "control": "nv*.oc.power_limit", "value": 300, "enabled": True},
+        # manual overclocking switches off the CPU's own boost management: leave it before the CPU gets hot
+        {"name": "Manual CPU overclock overtemp", "sensor": "cpu*.k10temp.temp1", "above": 90, "count": 2,
+         "control": "cpu*.smu.oc_mode", "value": 0, "enabled": True},
         {"name": "AMD GPU hotspot (junction) overtemp", "sensor": "amdgpu*.hwmon.temp2", "above": 105, "count": 3,
          "control": "amdgpu*.oc.power_cap", "value": "min", "enabled": True},
         # for RDNA4 cards with the board-power shunts bypassed: the power cap no longer bites, so cut
