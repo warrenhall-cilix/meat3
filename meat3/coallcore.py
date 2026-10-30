@@ -36,7 +36,9 @@ class CoAllcore:
         self.test_limits, self.stock_limits = test_limits, stock_limits
         self.run_phase, self.kmsg_bad, self.sampler, self.suite, self.save = run_phase, kmsg_bad, sampler, suite, save
         self.step, self.floor, self.phase_s, self.log = step, floor, phase_s, log
-        self.r = res.setdefault("map", {}).setdefault("co_allcore", {"ccds": {}, "steps": [], "check": {}})
+        self.r = res.setdefault("map", {}).setdefault("co_allcore", {})
+        for key, empty in (("ccds", {}), ("steps", []), ("check", {})):
+            self.r.setdefault(key, empty)                # also when the caller created the section first
 
     # ---- state
     def recover(self) -> Optional[str]:

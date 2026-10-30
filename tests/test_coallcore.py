@@ -63,6 +63,12 @@ class CoAllcoreTest(unittest.TestCase):
         self.assertIn("CCD0 CO -25", text)
         self.assertIn("5200 MHz at CO 0 -> 5300 MHz tuned", text)
 
+    def test_section_created_by_caller(self):
+        self.res["map"] = {"co_allcore": {"stock_limits": {"ppt_limit": 200}}}   # what run_co_allcore does first
+        t = self.make({0: -10, 1: -10}, {k: -40 for k in range(4)})
+        t.run()
+        self.assertEqual(self.res["map"]["co_allcore"]["result"], {"0": -10, "1": -10})
+
     def test_crash_recovery(self):
         t = self.make({0: -99, 1: -99}, {k: -99 for k in range(4)})
         self.res["map"] = {"co_allcore": {"ccds": {"0": {"passes": [{"co": -20}], "co": -20}}, "steps": [], "check": {},

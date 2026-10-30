@@ -345,3 +345,36 @@ class CrashBeforeStepTest(unittest.TestCase):
             mp.run_manual([0], 1.25, Oc(), 5000, 100)
         self.assertEqual(saved[0]["target"], 6000)              # on disk before the clock was applied
         self.assertIn("6000 MHz: marked unstable", mp.recover_at_voltage().replace("at 6000", "6000"))
+
+
+class ToolOutputTest(unittest.TestCase):
+    """Real output captured from Prime95 30.19 and y-cruncher 0.8.7 on the 9950X3D."""
+
+    P95_OK = """[Worker Oct 30 20:01] Beginning a continuous torture test on your computer.
+[Worker Oct 30 20:01] Test 1, 7000000 Lucas-Lehmer in-place iterations of M83839 using FMA3 FFT length 4K.
+[Worker Oct 30 20:02] Self-test 4K passed!
+[Worker Oct 30 20:02] Torture Test completed 1 tests in 0 minutes - 0 errors, 0 warnings.
+"""
+    YC_OK = ("  6   Stop on Error:      Enabled\n"
+             "Running BKT: Passed  Test Speed:  2.94 * 10^09  bits / sec\r"
+             "Running SFTv4:                    \rRunning SFTv4: Passed  Test Speed:  1.55 * 10^10  bits / sec\n")
+
+    def test_prime95(self):
+        from meat3 import cpuvalidate as cv
+        self.assertFalse(any(cv.P95_FAIL.search(l) for l in self.P95_OK.splitlines()))   # "0 errors" is a pass
+        self.assertEqual(len(cv.P95_PASS.findall(self.P95_OK)), 1)
+        for bad in ("FATAL ERROR: Rounding was 0.5, expected less than 0.4",
+                    "Hardware failure detected running 4K FFT size, consult stress.txt file.",
+                    "Torture Test completed 3 tests in 2 minutes - 1 errors, 0 warnings.",
+                    "ERROR: ILLEGAL SUMOUT"):
+            self.assertTrue(cv.P95_FAIL.search(bad), bad)
+        self.assertIn("NumWorkers=32", cv.p95_config("p95-avx2", 32))
+        self.assertNotIn("NumCores=1", cv.p95_config("p95-avx2", 32))
+
+    def test_ycruncher(self):
+        from meat3 import cpuvalidate as cv
+        ok, why = cv.parse_ycruncher(self.YC_OK, ran_full=True)
+        self.assertTrue(ok, why)
+        self.assertFalse(cv.parse_ycruncher(self.YC_OK, ran_full=False)[0])                # exited by itself
+        self.assertFalse(cv.parse_ycruncher("Running FFTv4: Failed  coefficient mismatch\n", True)[0])
+        self.assertFalse(cv.parse_ycruncher("Stop on Error: Enabled\n", True)[0])           # nothing ran

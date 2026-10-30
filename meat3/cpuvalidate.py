@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -30,14 +31,20 @@ from typing import Callable, Optional
 PHASES = ["p95-sse", "p95-avx2", "p95-avx512", "p95-l3", "ycruncher"]
 YC_BIN = "/usr/lib/y-cruncher/Binaries/24-ZN5 ~ Komari"   # the Zen 5 build: an executable, not a folder
 YC_TESTS = ["BKT", "BBP", "SFTv4", "SNT", "SVT", "FFTv4", "N63", "VT3"]
-P95_FAIL = re.compile(r"FATAL ERROR|TORTURE TEST FAILED|Hardware failure detected|ILLEGAL SUMOUT|SUM\(INPUTS\) != "
-                      r"SUM\(OUTPUTS\)|ROUND ?OFF|rounding was|error|Error", re.I)
-P95_PASS = re.compile(r"Self-test \S+ passed|Torture Test completed|passed!", re.I)
-YC_FAIL = re.compile(r"error|failed|incorrect|mismatch|exception|crash", re.I)
+# Prime95 prints "Self-test 4K passed!" per FFT size and, when stopped, "Torture Test completed N tests in M minutes
+# - 0 errors, 0 warnings." Failures are explicit; "0 errors" must not count as one.
+P95_FAIL = re.compile(r"FATAL ERROR|TORTURE TEST FAILED|Hardware failure detected|Possible hardware failure|"
+                      r"ILLEGAL SUMOUT|SUM\(INPUTS\) != SUM\(OUTPUTS\)|ROUND ?OFF|Rounding was|"
+                      r"[1-9]\d* errors?,", re.I)
+P95_PASS = re.compile(r"Self-test \S+ passed", re.I)
+# y-cruncher's stress tester prints "Running BKT: Passed  Test Speed: ..." per test, forever (Run Forever);
+# anything other than Passed after "Running X:" is a failure. Its menu shows "Stop on Error: Enabled".
+YC_LINE = re.compile(r"Running (\S+):\s+(\S.*)")
+YC_FAIL = re.compile(r"\bFAIL|\bError\b(?!:\s+Enabled)|Exception|Unrecoverable|mismatch|incorrect", re.I)
 
 
 # ----------------------------------------------------------------------------- tool runners
-def p95_config(mode: str) -> str:
+def p95_config(mode: str, threads: int = 1) -> str:
     avx, avx2, avx512 = {"p95-sse": (0, 0, 0), "p95-avx2": (1, 1, 0), "p95-avx512": (1, 1, 1),
                          "p95-l3": (1, 1, 0)}[mode]
     lo, hi = (448, 8192) if mode == "p95-l3" else (4, 64)
@@ -46,7 +53,8 @@ def p95_config(mode: str) -> str:
         "RollingAverageIsFromV27=1", "ExitOnX=1",
         "CpuSupportsSSE=1", "CpuSupportsSSE2=1", f"CpuSupportsAVX={avx}", f"CpuSupportsAVX2={avx2}",
         f"CpuSupportsFMA3={avx2}", f"CpuSupportsAVX512F={avx512}",
-        "NumWorkers=1", "NumCores=1", "CoresPerTest=1", "TortureHyperthreading=0",
+        *(["NumWorkers=1", "NumCores=1", "CoresPerTest=1", "TortureHyperthreading=0"] if threads == 1 else
+          [f"NumWorkers={threads}", "CoresPerTest=1", "TortureHyperthreading=0"]),
         "EnableSetAffinity=0", "EnableSetPriority=0",
         "TortureMem=0", "TortureTime=1", f"MinTortureFFT={lo}", f"MaxTortureFFT={hi}",
         "ResultsFileTimestampInterval=60", ""])
@@ -55,9 +63,7 @@ def p95_config(mode: str) -> str:
 def run_p95(mode: str, cpus: list[int], seconds: int, threads: int = 1) -> tuple[bool, str]:
     d = tempfile.mkdtemp(prefix="meat3-p95-")
     try:
-        cfg = p95_config(mode)
-        if threads > 1:
-            cfg = cfg.replace("NumCores=1", f"NumCores={threads}")
+        cfg = p95_config(mode, threads)
         with open(os.path.join(d, "prime.txt"), "w") as f:
             f.write(cfg)
         cmd = ["taskset", "-c", ",".join(map(str, cpus)), "mprime", "-t", f"-W{d}"]
@@ -65,9 +71,9 @@ def run_p95(mode: str, cpus: list[int], seconds: int, threads: int = 1) -> tuple
         try:
             out, _ = p.communicate(timeout=seconds)
         except subprocess.TimeoutExpired:
-            p.terminate()
+            p.send_signal(signal.SIGINT)                 # Prime95 stops cleanly and prints its summary
             try:
-                out, _ = p.communicate(timeout=15)
+                out, _ = p.communicate(timeout=30)
             except subprocess.TimeoutExpired:
                 p.kill()
                 out, _ = p.communicate()
@@ -86,6 +92,8 @@ def run_p95(mode: str, cpus: list[int], seconds: int, threads: int = 1) -> tuple
             return False, bad[0][:160]
         if not ran_full:
             return False, f"mprime exited early ({p.returncode}): " + log.strip()[-160:]
+        if not P95_PASS.search(log) and seconds >= 120:
+            return False, "no FFT size completed: " + log.strip()[-160:]
         return True, f"{len(P95_PASS.findall(log))} FFT sizes passed"
     finally:
         shutil.rmtree(d, ignore_errors=True)
@@ -110,18 +118,41 @@ def run_ycruncher(cpus: list[int], seconds: int, mem_bytes: Optional[int] = None
         p = subprocess.Popen([exe, "skip-warnings", "config", os.path.join(d, "stress.cfg")], cwd=d,
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         try:
-            out, _ = p.communicate(timeout=per * len(YC_TESTS) + 60)
+            out, _ = p.communicate(timeout=seconds)
+            ran_full = False                          # it runs until stopped: exiting means it stopped on an error
         except subprocess.TimeoutExpired:
-            p.kill()
-            out, _ = p.communicate()
-            return False, "y-cruncher didn't finish in time (hung?)"
-        lines = [ln for ln in (out or "").splitlines() if ln.strip()]
-        bad = [ln.strip() for ln in lines if YC_FAIL.search(ln) and "0 error" not in ln.lower()]
-        if p.returncode != 0 or bad:
-            return False, (bad[0] if bad else f"y-cruncher exit {p.returncode}: " + " ".join(lines[-2:]))[:160]
-        return True, f"{len(YC_TESTS)} tests passed"
+            p.send_signal(signal.SIGINT)
+            try:
+                out, _ = p.communicate(timeout=20)
+            except subprocess.TimeoutExpired:
+                p.kill()
+                out, _ = p.communicate()
+            ran_full = True
+        return parse_ycruncher(out or "", ran_full)
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+
+def parse_ycruncher(out: str, ran_full: bool) -> tuple[bool, str]:
+    text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", out).replace("\r", "\n")
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    passed, bad = 0, []
+    for ln in lines:
+        m = YC_LINE.match(ln)
+        if m:
+            if m.group(2).startswith("Passed"):
+                passed += 1
+            else:
+                bad.append(ln)
+        elif YC_FAIL.search(ln):
+            bad.append(ln)
+    if bad:
+        return False, bad[0][:160]
+    if not ran_full:
+        return False, "y-cruncher stopped by itself: " + " | ".join(lines[-3:])[:160]
+    if not passed:
+        return False, "no test completed: " + " | ".join(lines[-3:])[:160]
+    return True, f"{passed} tests passed"
 
 
 def tools_missing() -> list[str]:
