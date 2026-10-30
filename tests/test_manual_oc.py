@@ -1,4 +1,5 @@
 """Manual overclocking: SMU encodings, gating, controls, the --oc-probe flow and the manual at-voltage test."""
+import json
 import os
 import shutil
 import sys
@@ -312,3 +313,35 @@ class ValidateTest(unittest.TestCase):
         y = cpuvalidate.yc_config([8], 30, 256 << 20)
         self.assertIn("LogicalCores : [8]", y)
         self.assertIn('"VT3"', y)
+
+
+class CrashBeforeStepTest(unittest.TestCase):
+    """A crash on the very first load at a new clock (before the stress suite) must still be recorded."""
+
+    def test_manual_marks_step_before_setting_clock(self):
+        from meat3 import cpumap
+        saved = []
+        res = {"map": {}}
+
+        class Boom(Exception):
+            pass
+
+        class Oc:
+            def mode(self, on): pass
+            def vid(self, v): pass
+            def freq_all(self, f): pass
+            def freq_core(self, k, f):
+                if f >= 6000:
+                    saved.append(json.loads(json.dumps(res["map"].get("current_av"))))
+                    raise Boom()
+
+        class B:
+            sys = type("S", (), {"cores": [[0, 4]], "ccds": []})()
+            def measure(self, cores, cpus): return {"clk": 5890.0}
+            def restore(self): pass
+        res["map"]["at_voltage"] = {"1.250V manual": {"0": {"passes": [{"target": 5900, "co": 0}]}}}
+        mp = cpumap.Mapper(B(), res, None, lambda cpu: (True, ""), lambda: None, log=lambda *a: None)
+        with self.assertRaises(Boom):
+            mp.run_manual([0], 1.25, Oc(), 5000, 100)
+        self.assertEqual(saved[0]["target"], 6000)              # on disk before the clock was applied
+        self.assertIn("6000 MHz: marked unstable", mp.recover_at_voltage().replace("at 6000", "6000"))

@@ -189,8 +189,12 @@ class Validator:
         cpu = self.sys.cores[k][0]
         while True:
             f = c["mhz"]
+            # recorded before the clock is set: the first load at it can already crash the PC
+            self.v["current"] = {"core": k, "phase": "clock check", "mhz": f}
+            self.save()
             self.oc.freq_core(k, f)
             m = self.measure(k, cpu)
+            self.v.pop("current", None)
             if m.get("clk") is None or abs(m["clk"] - f) > 75:
                 self.log(f"   core {k}: asked {f} MHz, runs {m.get('clk') or 0:.0f}; stopping this core")
                 c["error"] = f"clock didn't follow ({m.get('clk')})"

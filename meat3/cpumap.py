@@ -260,8 +260,11 @@ class Mapper:
                 while True:
                     if r.get("fail") is not None and f >= r["fail"]:
                         break
+                    self.m["current_av"] = {"tag": tag, "core": str(k), "target": f, "co": co}
+                    self.save()
                     cap, clk = self.calibrate(k, f)
                     if cap is None:
+                        self.m.pop("current_av", None)
                         r["ceiling"] = clk
                         self.log(f"   {f} MHz: out of reach (runs {clk or 0:.0f}): clock ceiling")
                         break
@@ -274,6 +277,7 @@ class Mapper:
                     else:
                         co_v, meas = self.co_for_voltage(k, volt, co)
                     if co_v is None:
+                        self.m.pop("current_av", None)
                         r["co_limit"] = f
                         self.log(f"   {f} MHz: needs more than CO -50 to get to {volt:.3f} V "
                                  f"({(meas or {}).get('volt') or 0:.3f} V)")
@@ -331,14 +335,16 @@ class Mapper:
                             r["ceiling"] = f
                             self.log(f"   stopped at {MANUAL_MAX_MHZ} MHz (test limit)")
                             break
+                        # recorded before the new clock is set: the first load at it can already crash
+                        self.m["current_av"] = {"tag": tag, "core": str(k), "target": f, "co": 0}
+                        self.save()
                         oc.freq_core(k, f)
                         meas = self.b.measure([k], [cpu])
                         if meas.get("clk") is None or abs(meas["clk"] - f) > 75:
+                            self.m.pop("current_av", None)
                             r["ceiling"] = f
                             self.log(f"   {f} MHz: core runs {meas.get('clk') or 0:.0f} MHz instead: clock limit")
                             break
-                        self.m["current_av"] = {"tag": tag, "core": str(k), "target": f, "co": 0}
-                        self.save()
                         ok, why = self.suite(cpu)
                         self.m.pop("current_av", None)
                         if not ok:
