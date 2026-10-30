@@ -1,0 +1,148 @@
+# Web UI and Prometheus
+
+`meat3-web` is a read-only browser view of the daemon's sensors. It's meant for headless machines,
+and for checking a PC from a phone. It also serves Prometheus metrics. **It's off by default.**
+
+## What it can and can't do
+
+It has three tabs:
+- **Overview:** the same panels as the TUI.
+- **Sensors:** every sensor with min/max/avg, with a filter.
+- **Graphs:** pin any sensor to see up to 15 minutes of history, or an hour with `history_s`.
+
+**It can't change anything.** There are no overclocking, fan, OSD or update controls. The service
+runs as a throwaway system user (systemd `DynamicUser`). That user can read the socket, but the
+daemon doesn't accept changes from it. The unit is also sandboxed: no access to `/home`, a
+read-only system, no devices.
+
+## Turning it on and off
+
+```sh
+./packaging/install.sh --web                 # desktop: also enable the web UI
+./packaging/install.sh --headless --web      # server: no Qt or MangoHud, web UI on
+sudo systemctl enable --now meat3-web        # or enable it on an existing install
+sudo systemctl disable --now meat3-web       # turn it off
+```
+
+It listens on port 8733.
+
+## Logging in
+
+```sh
+sudo meat3-web --url        # prints the login link
+```
+
+Open the link once in each browser. It sets a cookie that lasts 30 days. The token is in
+`/etc/meat3/web.token`.
+
+**To log everyone out:**
+
+```sh
+sudo rm /etc/meat3/web.token
+sudo meat3-web --gen-token
+sudo systemctl restart meat3-web
+```
+
+## Security
+
+Plain HTTP sends the token unencrypted. That's acceptable on a home LAN. Anywhere else, use one of:
+- HTTPS (`cert` and `key` below);
+- a reverse proxy;
+- an SSH tunnel: `ssh -L 8733:localhost:8733 host`, then open `http://localhost:8733`.
+
+**Requests without a login:** when the login is off, or `/metrics` is public, a request must be
+addressed to one of:
+- an IP address;
+- `localhost`;
+- the machine's hostname;
+- a name in `allowed_hosts`.
+
+This blocks DNS rebinding.
+
+## Settings
+
+Under `"web"` in `/etc/meat3/config.json`. Restart `meat3-web` after changing them.
+
+| Key | Default | |
+|---|---|---|
+| `listen` | `"0.0.0.0"` | `"127.0.0.1"` for SSH tunnels only |
+| `port` | `8733` | |
+| `history_s` | `900` | How far back graphs go, up to `3600` |
+| `cert`, `key` | `""` | PEM files to serve HTTPS (see below) |
+| `token_file` | `/etc/meat3/web.token` | |
+| `auth` | `true` | `false` only behind your own authenticating proxy |
+| `metrics_public` | `false` | Serve `/metrics` without the token |
+| `allowed_hosts` | `[]` | Extra DNS names accepted without a login |
+
+**Certificate files:** the service can't read `/home`, so keep them somewhere like `/etc/meat3/`.
+Make the key owned by `root:meat3` with mode `0640`.
+
+## Prometheus
+
+`/metrics` serves every sensor in Prometheus text format.
+
+**Metric names:** one per unit, converted to base units:
+
+| Metric | Unit in the UI |
+|---|---|
+| `meat3_temperature_celsius` | °C |
+| `meat3_voltage_volts` | V, mV |
+| `meat3_power_watts` | W |
+| `meat3_current_amperes` | A, mA |
+| `meat3_frequency_hertz` | MHz, GHz |
+| `meat3_fan_speed_rpm` | RPM |
+| `meat3_percent` | % |
+| `meat3_size_bytes` | MB, GB, TB, MiB, GiB |
+| `meat3_throughput_bytes_per_second` | MB/s, MiB/s, GB/s, Mbit/s |
+| `meat3_duration_seconds` | h, min, s, ms, us |
+| `meat3_energy_joules` | J, Wh, kWh |
+| `meat3_value` | anything else |
+
+Network rates are shown in Mbit/s but exported in bytes per second. Multiply by 8 for bits.
+
+**Labels:** every series has `id`, `device`, `group`, `sensor` and `unit`.
+
+**Also exported:** `meat3_up`, `meat3_info{host,version}` and `meat3_poll_duration_seconds`.
+
+### Scraping
+
+Scraping needs the login token as a bearer token. Either give every machine the same token, or set
+`"metrics_public": true` on a trusted network.
+
+To use the same token everywhere, copy it from one machine to the others:
+
+```sh
+sudo install -m 640 -g meat3 web.token /etc/meat3/web.token
+sudo systemctl restart meat3-web
+```
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: meat3
+    scrape_interval: 10s
+    authorization:
+      credentials_file: /etc/prometheus/meat3.token   # contents of /etc/meat3/web.token
+    static_configs:
+      - targets: ['desktop:8733', 'proxmox1:8733', 'nas:8733']
+```
+
+## Grafana
+
+To add the dashboard:
+1. In Grafana, go to Dashboards → New → Import.
+2. Import `packaging/grafana/meat3-dashboard.json`.
+3. Choose machines with the *Machine* drop-down.
+
+**Rows:**
+- **Overview:** status per machine, hottest sensor, and total GPU and CPU power.
+- **GPU:** temperatures, power, clocks and load.
+- **CPU:** temperature, power, clock and usage.
+- **Motherboard:** temperatures, fans, supply rails, and CPU and memory voltages.
+- **Storage:** temperatures, throughput, life remaining, data written, media errors and unsafe
+  shutdowns.
+- **Network:** bandwidth per interface, link utilisation, TCP retransmits, data since boot, and
+  errors and drops per minute.
+
+The dashboard JSON is generated by `tools/make_grafana_dashboard.py`. Edit that script rather than
+the JSON.
