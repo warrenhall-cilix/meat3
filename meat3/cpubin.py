@@ -3,6 +3,7 @@
     sudo meat3-bin --label A              # fused data, boost clocks, voltage/frequency curve (~15 min, safe)
     sudo meat3-bin --label A --co         # also per-core Curve Optimizer search (hours; uses meat3-cotune)
     sudo meat3-bin --label A --boost      # re-measure boost clocks with the Curve Optimizer results applied
+    sudo meat3-bin --label A --map        # static V/F map: lowest stable voltage per core at fixed clocks (hours)
     meat3-bin --report A
     meat3-bin --compare A B
 
@@ -32,6 +33,8 @@ import subprocess
 import sys
 import time
 from typing import Callable, Optional
+
+from meat3 import cpumap
 
 STORE = "/var/lib/meat3/bin"
 SOCK = "/run/meat3/meat3.sock"
@@ -306,8 +309,15 @@ def save(res: dict, store: str = STORE) -> None:
     tmp = p + ".tmp"
     with open(tmp, "w") as f:
         json.dump(res, f, indent=1)
+        f.flush()
+        os.fsync(f.fileno())                    # the map's in-progress step must survive a hard hang
     os.chmod(tmp, 0o644)
     os.replace(tmp, p)
+    dfd = os.open(os.path.dirname(p), os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
 
 
 def volt_at(curve: list[dict], mhz: float) -> Optional[float]:
@@ -394,6 +404,7 @@ def report(res: dict) -> str:
                 L.append(f"     limit {a['cap']:5.0f}: {fmt(a.get('clk'), ' MHz'):>9} {fmt(a.get('volt'), ' V', 3):>8}"
                          f"   | {fmt(b.get('clk'), ' MHz'):>9} {fmt(b.get('volt'), ' V', 3):>8} "
                          f"{fmt(b.get('power'), ' W', 1):>7} {fmt(b.get('temp'), ' °C'):>6}")
+        L += cpumap.report_lines(res, ccd)
     return "\n".join(L)
 
 
@@ -450,9 +461,25 @@ def compare(a: dict, b: dict) -> str:
                 better = a["label"] if d > 0 else b["label"]
                 L.append(f"  {name:32}{b['label']} {'+' if d >= 0 else ''}{d:.0f} mV vs {a['label']}"
                          f"  -> {better} {'needs less' if abs(d) >= 5 else '(within noise)'}")
-        # verdict: voltage at the same clock is the silicon quality; CO and clocks back it up
+        # static map: lowest stable voltage at the same clocks, both chips
+        ma, mb = cpumap.ccd_map(a, roles_a[role]), cpumap.ccd_map(b, roles_b[role])
+        map_d = []
+        for t in [t for t in ma if t in mb]:
+            for key, name in (("mean_min_v", "mean core"), ("worst_min_v", "worst core")):
+                d = (mb[t][key] - ma[t][key]) * 1000
+                map_d.append((key, d))
+                L.append(f"  {'stable V ' + ('max boost' if t == 'max' else str(t)) + ', ' + name:32}"
+                         f"{fmt(ma[t][key], ' V', 3):>12}{fmt(mb[t][key], ' V', 3):>12}"
+                         f"   ({b['label']} {'+' if d >= 0 else ''}{d:.0f} mV)")
+        # verdict: voltage at the same clock is the silicon quality; CO and clocks back it up.
+        # The stable-voltage map is the strongest evidence (it's the stability-tested version).
         score = {a["label"]: 0.0, b["label"]: 0.0}
         why = []
+        if map_d:
+            d = statistics.mean(x for _, x in map_d)
+            if abs(d) >= 5:
+                score[a["label"] if d > 0 else b["label"]] += 2.0
+                why.append(f"stable voltage {abs(d):.0f} mV lower")
         for d, wt, name in ((d1, 1.0, "1-core voltage"), (dn, 1.0, "all-core voltage")):
             if d is not None and abs(d) >= 5:
                 score[a["label"] if d > 0 else b["label"]] += wt
@@ -501,6 +528,54 @@ def collect_co(res: dict) -> None:
     if st.get("bin_label") == res["label"] and st.get("cores"):
         res["co"] = {k: {x: c.get(x) for x in ("pass", "fail", "result", "fail_reason")} for k, c in st["cores"].items()}
         res["co_params"] = st.get("params")
+
+
+# ----------------------------------------------------------------------------- static V/F map
+def run_map(args, res: dict, b: "Binner", d: Daemon) -> int:
+    from meat3 import cotune
+    ctl = d.controls()
+    if not (ctl.get(f"{b.p}.smu.co_core0") or {}).get("available"):
+        print("per-core Curve Optimizer isn't available (needs ryzen_smu and meat3d with amd_smu_controls)")
+        return 2
+
+    def apply_co(k: int, v: int) -> None:
+        r = d.call({"cmd": "apply", "id": f"{b.p}.smu.co_core{k}", "value": int(v)})
+        if not r.get("ok"):
+            raise RuntimeError(f"CO core {k} = {v} rejected: {r.get('msg')}")
+
+    km = cotune.Kmsg()
+    suite = lambda cpu: cpumap.stress_suite(cpu, args.step_time, cotune.stress, km.bad_lines)
+    mp = cpumap.Mapper(b, res, apply_co, suite, lambda: save(res), step=args.step, floor=args.map_floor)
+    try:
+        note = mp.recover()
+        if note:
+            print("!!", note)
+        if not res["map"].get("mapping_ok"):
+            print("== checking the Curve Optimizer core numbering (one core per CCD)")
+            sens = d.sensors()
+            ok, why = mp.check_mapping([b.best_core(c, sens) for c in b.sys.ccds])
+            if not ok:
+                print(f"stopped: {why}")
+                return 1
+            res["map"]["mapping_ok"] = True
+            save(res)
+        cores = [int(x) for x in args.map_cores.split(",")] if args.map_cores else \
+            [k for c in b.sys.ccds for k in c["cores"]]
+        clocks = cpumap.parse_clocks(args.map_clocks)
+        res["map"]["params"] = {"clocks": args.map_clocks, "step": args.step, "floor": args.map_floor,
+                                "step_time": args.step_time}
+        n = len(cores) * len(clocks)
+        print(f"== static V/F map: {len(cores)} cores x {len(clocks)} clocks, CO down to {args.map_floor} "
+              f"in steps of {args.step}, {args.step_time} s per step (up to ~{n * (abs(args.map_floor) // args.step + 1) * (args.step_time + 15) / 3600:.0f} h)")
+        mp.run(cores, clocks)
+    finally:
+        km.close()
+        for k in range(len(b.sys.cores)):
+            try:
+                apply_co(k, 0)
+            except Exception:
+                pass
+    return 0
 
 
 # ----------------------------------------------------------------------------- main
@@ -554,7 +629,11 @@ def run(args) -> int:
                     except Exception:
                         pass
             save(res)
-        if not args.co and not args.boost:
+        if args.map:
+            rc = run_map(args, res, b, d)
+            if rc != 0:
+                return rc
+        if not args.co and not args.boost and not args.map:
             print("== fused data")
             res["fused"] = b.fused()
             if any(res["fused"]["co_at_start"].values()):
@@ -587,8 +666,15 @@ def main(argv=None) -> int:
     ap.add_argument("--label", help="name for this chip, e.g. A or the serial number")
     ap.add_argument("--co", action="store_true", help="per-core Curve Optimizer search (hours)")
     ap.add_argument("--boost", action="store_true", help="re-measure boost clocks with the CO results applied")
+    ap.add_argument("--map", action="store_true",
+                    help="static V/F map: lowest stable voltage of every core at fixed clocks (hours)")
+    ap.add_argument("--map-clocks", default=cpumap.MAP_CLOCKS,
+                    help=f"--map: target clocks in MHz, 'max' = full boost (default {cpumap.MAP_CLOCKS})")
+    ap.add_argument("--map-cores", help="--map: comma-separated cores (default: all)")
+    ap.add_argument("--map-floor", type=int, default=-40, help="--map: most negative CO to try (default -40)")
+    ap.add_argument("--step", type=int, default=5, help="--map: CO step (default 5)")
     ap.add_argument("--floor", type=int, default=-30, help="--co: most negative CO to try (default -30)")
-    ap.add_argument("--step-time", type=int, default=60, help="--co: seconds per CO step (default 60)")
+    ap.add_argument("--step-time", type=int, default=60, help="--co/--map: seconds per CO step (default 60)")
     ap.add_argument("--points", type=int, default=8, help="voltage/frequency points per CCD (default 8)")
     ap.add_argument("--settle", type=float, default=4.0, help="seconds of load before sampling (default 4)")
     ap.add_argument("--sample", type=int, default=8, help="seconds sampled per point (default 8)")

@@ -180,3 +180,88 @@ class BinTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MapTest(unittest.TestCase):
+    """Static V/F map on the fake chip: CO lowers voltage ~4 mV/step; each core is stable down to its own limit."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def run_map(self, name, limits, offset_mv=0.0, clocks="4500,max", swap_co=False):
+        from meat3 import cpumap
+        root = os.path.join(self.tmp, name)
+        make_sys(root)
+        fake = FakeChip(root, offset_mv)
+        fake.co = {k: 0 for k in CORES}
+        base_sensors = fake.sensors
+
+        def sensors():
+            s = base_sensors()
+            for k in CORES:
+                s[f"cpu0.pmt.core{k}.volt"]["value"] += 0.004 * fake.co[k]
+            return s
+        fake.sensors = sensors
+        sysfs = cpubin.Sysfs(root)
+        b = cpubin.Binner(sysfs, fake, load=fake.load, sleep=lambda s: None, settle_s=0, sample_s=2,
+                          log=lambda *a: None)
+        res = {"label": name, "ccds": sysfs.ccds}
+        core_of = {c: k for k, cpus in CORES.items() for c in cpus}
+
+        def apply_co(k, v):
+            fake.co[(k + 2) % 4 if swap_co else k] = v     # swap_co: a chip where CO numbering is off
+
+        def suite(cpu):
+            k = core_of[cpu]
+            return (True, "") if fake.co[k] >= limits[k] else (False, "verify failed")
+        saves = []
+        mp = cpumap.Mapper(b, res, apply_co, suite, lambda: saves.append(1), step=5, floor=-40, log=lambda *a: None)
+        ok, why = mp.check_mapping([0, 2])
+        if not ok:
+            return res, why, root
+        mp.run(list(CORES), cpumap.parse_clocks(clocks))
+        return res, "", root
+
+    def test_map_finds_each_cores_limit(self):
+        res, err, root = self.run_map("A", {0: -20, 1: -10, 2: -30, 3: -15})
+        self.assertEqual(err, "")
+        from meat3 import cpumap
+        r = cpumap.point_result(res["map"]["points"]["0@4500"])
+        self.assertEqual(r["co"], -20)
+        self.assertAlmostEqual(r["margin_mv"], 80, delta=1)            # 20 steps-of-CO x 4 mV
+        self.assertEqual(res["map"]["points"]["1@4500"]["fail"], -15)
+        self.assertAlmostEqual(r["clk"], 4500, delta=25)                 # calibrated to the real clock
+        m = cpumap.ccd_map(res, res["ccds"][1])
+        self.assertEqual(list(m), [4500, "max"])
+        self.assertAlmostEqual(m[4500]["worst_margin"], 60, delta=1)     # core 3: -15
+        self.assertIn("static V/F map", cpubin.report(res))
+        for c in range(8):                                               # limits restored
+            with open(os.path.join(root, f"devices/system/cpu/cpu{c}/cpufreq/scaling_max_freq")) as f:
+                self.assertEqual(int(f.read()), MAX_KHZ)
+
+    def test_floor_marked_and_crash_recovery(self):
+        from meat3 import cpumap
+        res, _, _ = self.run_map("A", {0: -99, 1: -99, 2: -99, 3: -99}, clocks="4500")
+        r = cpumap.point_result(res["map"]["points"]["0@4500"])
+        self.assertTrue(r["floor_hit"])
+        self.assertIn("still stable at the CO floor", cpubin.report(res))
+        # a hang mid-step: the next run marks that step unstable
+        res["map"]["current"] = {"key": "2@4500", "co": -25, "since": 0}
+        res["map"]["points"]["2@4500"] = {"passes": [{"co": 0, "volt": 1.0, "clk": 4500}]}
+        mp = cpumap.Mapper(None, res, None, None, lambda: None)
+        self.assertIn("marked unstable", mp.recover())
+        self.assertEqual(res["map"]["points"]["2@4500"]["fail"], -25)
+        self.assertNotIn("current", res["map"])
+
+    def test_mapping_check_catches_wrong_numbering(self):
+        _, err, _ = self.run_map("A", {k: -30 for k in CORES}, swap_co=True)
+        self.assertIn("numbering may not match", err)
+
+    def test_compare_uses_stable_voltage(self):
+        a, _, _ = self.run_map("A", {0: -20, 1: -20, 2: -20, 3: -20})
+        b, _, _ = self.run_map("B", {0: -20, 1: -20, 2: -20, 3: -20}, offset_mv=-25)
+        a["label"], b["label"] = "A", "B"
+        out = cpubin.compare(a, b)
+        self.assertIn("stable V 4500, mean core", out)
+        self.assertIn("V-Cache CCD: B is better (stable voltage 25 mV lower)", out)
