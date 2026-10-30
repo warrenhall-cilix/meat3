@@ -4,6 +4,8 @@
     sudo meat3-bin --label A --co         # also per-core Curve Optimizer search (hours; uses meat3-cotune)
     sudo meat3-bin --label A --boost      # re-measure boost clocks with the Curve Optimizer results applied
     sudo meat3-bin --label A --map        # static V/F map: lowest stable voltage per core at fixed clocks (hours)
+    sudo meat3-bin --label A --at-voltage 1.25   # highest stable clock per core at <= 1.25 V (hours)
+    sudo meat3-bin --label A --at-voltage 1.25 --fixed-voltage   # same, with 1.25 V set by hand in the BIOS
     meat3-bin --report A
     meat3-bin --compare A B
 
@@ -461,6 +463,15 @@ def compare(a: dict, b: dict) -> str:
                 better = a["label"] if d > 0 else b["label"]
                 L.append(f"  {name:32}{b['label']} {'+' if d >= 0 else ''}{d:.0f} mV vs {a['label']}"
                          f"  -> {better} {'needs less' if abs(d) >= 5 else '(within noise)'}")
+        # clocks at a fixed voltage, both chips
+        av_a, av_b = cpumap.ccd_at_voltage(a, roles_a[role]), cpumap.ccd_at_voltage(b, roles_b[role])
+        av_d = []
+        for tag in [t for t in av_a if t in av_b]:
+            for key, name in (("mean", "mean core"), ("worst", "worst core"), ("best", "best core")):
+                L.append(f"  {'clock at ' + tag + ', ' + name:32}{fmt(av_a[tag][key], ' MHz'):>12}{fmt(av_b[tag][key], ' MHz'):>12}")
+            av_d.append(av_b[tag]["mean"] - av_a[tag]["mean"])
+            if av_a[tag]["ceiling"] or av_b[tag]["ceiling"]:
+                L.append(f"  {'':32}(cores at the boost ceiling: {av_a[tag]['ceiling']} / {av_b[tag]['ceiling']})")
         # static map: lowest stable voltage at the same clocks, both chips
         ma, mb = cpumap.ccd_map(a, roles_a[role]), cpumap.ccd_map(b, roles_b[role])
         map_d = []
@@ -475,6 +486,11 @@ def compare(a: dict, b: dict) -> str:
         # The stable-voltage map is the strongest evidence (it's the stability-tested version).
         score = {a["label"]: 0.0, b["label"]: 0.0}
         why = []
+        if av_d:
+            d = statistics.mean(av_d)
+            if abs(d) >= 25:
+                score[b["label"] if d > 0 else a["label"]] += 2.0
+                why.append(f"{abs(d):.0f} MHz more at the same voltage")
         if map_d:
             d = statistics.mean(x for _, x in map_d)
             if abs(d) >= 5:
@@ -547,10 +563,11 @@ def run_map(args, res: dict, b: "Binner", d: Daemon) -> int:
     suite = lambda cpu: cpumap.stress_suite(cpu, args.step_time, cotune.stress, km.bad_lines)
     mp = cpumap.Mapper(b, res, apply_co, suite, lambda: save(res), step=args.step, floor=args.map_floor)
     try:
-        note = mp.recover()
-        if note:
-            print("!!", note)
-        if not res["map"].get("mapping_ok"):
+        for note in (mp.recover(), mp.recover_at_voltage()):
+            if note:
+                print("!!", note)
+        # with the voltage fixed in the BIOS, CO can't move it, so there's nothing to check (or to get wrong)
+        if not res["map"].get("mapping_ok") and not (args.at_voltage and args.fixed_voltage):
             print("== checking the Curve Optimizer core numbering (one core per CCD)")
             sens = d.sensors()
             ok, why = mp.check_mapping([b.best_core(c, sens) for c in b.sys.ccds])
@@ -561,6 +578,14 @@ def run_map(args, res: dict, b: "Binner", d: Daemon) -> int:
             save(res)
         cores = [int(x) for x in args.map_cores.split(",")] if args.map_cores else \
             [k for c in b.sys.ccds for k in c["cores"]]
+        if args.at_voltage:
+            if not 0.8 <= args.at_voltage <= 1.40:
+                print("--at-voltage must be between 0.80 and 1.40 V")
+                return 2
+            print(f"== highest stable clock per core at <= {args.at_voltage:.3f} V: {len(cores)} cores, from "
+                  f"{args.av_start} MHz in {args.av_step} MHz steps, {args.step_time} s per step")
+            mp.run_at_voltage(cores, args.at_voltage, args.av_start, args.av_step, fixed=args.fixed_voltage)
+            return 0
         clocks = cpumap.parse_clocks(args.map_clocks)
         res["map"]["params"] = {"clocks": args.map_clocks, "step": args.step, "floor": args.map_floor,
                                 "step_time": args.step_time}
@@ -629,11 +654,11 @@ def run(args) -> int:
                     except Exception:
                         pass
             save(res)
-        if args.map:
+        if args.map or args.at_voltage:
             rc = run_map(args, res, b, d)
             if rc != 0:
                 return rc
-        if not args.co and not args.boost and not args.map:
+        if not args.co and not args.boost and not args.map and not args.at_voltage:
             print("== fused data")
             res["fused"] = b.fused()
             if any(res["fused"]["co_at_start"].values()):
@@ -672,6 +697,12 @@ def main(argv=None) -> int:
                     help=f"--map: target clocks in MHz, 'max' = full boost (default {cpumap.MAP_CLOCKS})")
     ap.add_argument("--map-cores", help="--map: comma-separated cores (default: all)")
     ap.add_argument("--map-floor", type=int, default=-40, help="--map: most negative CO to try (default -40)")
+    ap.add_argument("--at-voltage", type=float, metavar="V",
+                    help="highest stable clock of every core at or below this voltage, e.g. 1.25 (hours)")
+    ap.add_argument("--fixed-voltage", action="store_true",
+                    help="--at-voltage: the voltage is set by hand in the BIOS; don't use Curve Optimizer")
+    ap.add_argument("--av-start", type=int, default=5000, help="--at-voltage: first clock tried, MHz (default 5000)")
+    ap.add_argument("--av-step", type=int, default=100, help="--at-voltage: clock step, MHz (default 100)")
     ap.add_argument("--step", type=int, default=5, help="--map: CO step (default 5)")
     ap.add_argument("--floor", type=int, default=-30, help="--co: most negative CO to try (default -30)")
     ap.add_argument("--step-time", type=int, default=60, help="--co/--map: seconds per CO step (default 60)")

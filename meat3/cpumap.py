@@ -33,7 +33,9 @@ HEAVY_METHODS = ["matrixprod", "fft", "int128decimal64", "double", "int64", "pri
 MAP_CLOCKS = "4500,5000,5300,max"
 CO_PROBE = -15                 # mapping check: this CO on one core must lower that core's voltage
 CO_PROBE_MIN_DROP_V = 0.015
-OTHERS_FRAC = 0.5              # other cores' limit while one core is mapped (~2.9 GHz on a 9950X3D)
+MV_PER_CO = 2.5                # measured on a 9950X3D: ~12.5 mV per 5 CO steps (only a starting guess)
+FIXED_TOLERANCE_V = 0.05      # --fixed-voltage: measured voltage must be within this of the BIOS setting
+OTHERS_FRAC = 0.5             # other cores' limit while one core is mapped (~2.9 GHz on a 9950X3D)
 
 
 def parse_clocks(text: str) -> list:
@@ -215,7 +217,128 @@ class Mapper:
                 self.save()
 
 
+    # ---- clocks at a fixed voltage
+    def co_for_voltage(self, k: int, volt: float, co: int, floor: int = -50) -> tuple[Optional[int], Optional[dict]]:
+        """CO at which core k runs at or below `volt` at the current clock, searched downwards from `co`.
+        (co, measurement), or (None, last measurement) if even `floor` isn't enough."""
+        cpu = self.cpus_of(k)[0]
+        meas, prev, mv_per_co = None, None, MV_PER_CO
+        for _ in range(12):
+            self.apply_co(k, co)
+            meas = self.b.measure([k], [cpu])
+            v = meas.get("volt")
+            if v is None:
+                return None, meas
+            if v <= volt + 0.002:
+                return co, meas
+            if co <= floor:
+                return None, meas
+            if prev and prev[0] != co and prev[1] > v:      # learn this core's real mV per CO step
+                mv_per_co = max(0.5, (prev[1] - v) * 1000 / (prev[0] - co))
+            prev = (co, v)
+            co = max(floor, co - max(1, round((v - volt) * 1000 / mv_per_co)))
+        return None, meas
+
+    def run_at_voltage(self, cores: list[int], volt: float, start_mhz: int = 5000, step_mhz: int = 100,
+                       fixed: bool = False) -> None:
+        """fixed=True: the voltage is set by hand in the BIOS, so CO isn't touched (it does nothing then);
+        the measured voltage is recorded, and a reading far from `volt` stops the run."""
+        tag = f"{volt:.3f}V" + (" fixed" if fixed else "")
+        av = self.m.setdefault("at_voltage", {}).setdefault(tag, {})
+        for k in cores:
+            r = av.setdefault(str(k), {"passes": []})
+            if r.get("done"):
+                continue
+            cpu = self.cpus_of(k)[0]
+            f = (r["passes"][-1]["target"] + (step_mhz if r.get("fail") is None else step_mhz // 2)) \
+                if r["passes"] else start_mhz
+            co = r["passes"][-1]["co"] if r["passes"] else 0
+            self.log(f"== core {k}: highest clock at <= {volt:.3f} V, from {f} MHz")
+            try:
+                while True:
+                    if r.get("fail") is not None and f >= r["fail"]:
+                        break
+                    cap, clk = self.calibrate(k, f)
+                    if cap is None:
+                        r["ceiling"] = clk
+                        self.log(f"   {f} MHz: out of reach (runs {clk or 0:.0f}): clock ceiling")
+                        break
+                    if fixed:
+                        co_v, meas = 0, self.b.measure([k], [cpu])
+                        mv = meas.get("volt")
+                        if mv is None or abs(mv - volt) > FIXED_TOLERANCE_V:
+                            raise RuntimeError(f"core {k} reads {mv or 0:.3f} V under load, not the {volt:.3f} V "
+                                               f"set in the BIOS: check the Vcore setting and load-line calibration")
+                    else:
+                        co_v, meas = self.co_for_voltage(k, volt, co)
+                    if co_v is None:
+                        r["co_limit"] = f
+                        self.log(f"   {f} MHz: needs more than CO -50 to get to {volt:.3f} V "
+                                 f"({(meas or {}).get('volt') or 0:.3f} V)")
+                        break
+                    co = co_v
+                    r["current"] = {"target": f, "co": co}
+                    self.m["current_av"] = {"tag": tag, "core": str(k), "target": f, "co": co}
+                    self.save()
+                    ok, why = self.suite(cpu)
+                    self.apply_co(k, 0)
+                    self.m.pop("current_av", None)
+                    r.pop("current", None)
+                    if not ok:
+                        r["fail"], r["fail_reason"] = f, why
+                        self.log(f"   {f} MHz at {meas.get('volt'):.3f} V (CO {co}): FAIL - {why}")
+                        self.save()
+                        if r["passes"] and f - r["passes"][-1]["target"] > step_mhz // 2:
+                            f = r["passes"][-1]["target"] + step_mhz // 2     # one finer step
+                            continue
+                        break
+                    r["passes"].append({"target": f, "co": co, "clk": meas.get("clk"), "volt": meas.get("volt"),
+                                        "temp": meas.get("temp")})
+                    self.log(f"   {f} MHz: pass at {meas.get('clk') or 0:.0f} MHz, {meas.get('volt'):.3f} V (CO {co})")
+                    self.save()
+                    f += step_mhz if r.get("fail") is None else step_mhz // 2
+            finally:
+                self.apply_co(k, 0)
+                self.b.restore()
+            r["done"] = True
+            self.save()
+
+    def recover_at_voltage(self) -> Optional[str]:
+        cur = self.m.pop("current_av", None)
+        if not cur:
+            return None
+        r = self.m.get("at_voltage", {}).get(cur["tag"], {}).get(cur["core"])
+        if r is not None:
+            r.pop("current", None)
+            r["fail"], r["fail_reason"] = cur["target"], "system hung/rebooted/was interrupted during this step"
+        self.save()
+        return f"the last run stopped while testing core {cur['core']} at {cur['target']} MHz: marked unstable"
+
+
 # ----------------------------------------------------------------------------- results
+def at_voltage_result(r: dict) -> dict:
+    passes = r.get("passes", [])
+    if not passes:
+        return {"clk": None}
+    best = max(passes, key=lambda x: x["target"])
+    limit = "ceiling" if r.get("ceiling") is not None else "CO limit" if r.get("co_limit") is not None else \
+        "unstable" if r.get("fail") is not None else "?"
+    return {"clk": best.get("clk") or best["target"], "target": best["target"], "co": best["co"],
+            "volt": best.get("volt"), "limit": limit}
+
+
+def ccd_at_voltage(res: dict, ccd: dict) -> dict:
+    """tag -> {'cores': {k: result}, 'mean', 'best', 'worst'} for this CCD."""
+    out = {}
+    for tag, cores in ((res.get("map") or {}).get("at_voltage") or {}).items():
+        rs = {k: at_voltage_result(cores[str(k)]) for k in ccd["cores"] if str(k) in cores}
+        clks = [r["clk"] for r in rs.values() if r.get("clk")]
+        if clks:
+            out[tag] = {"cores": rs, "mean": statistics.mean(clks), "best": max(clks), "worst": min(clks),
+                        "ceiling": sum(1 for r in rs.values() if r.get("limit") == "ceiling")}
+    return out
+
+
 def point_result(p: dict) -> dict:
     """stock V (CO 0), lowest stable V, margin (mV), clock, best CO."""
     passes = [x for x in p.get("passes", []) if x.get("volt")]
@@ -256,10 +379,19 @@ def ccd_map(res: dict, ccd: dict) -> dict:
 
 
 def report_lines(res: dict, ccd: dict) -> list[str]:
+    L = []
+    for tag, d in ccd_at_voltage(res, ccd).items():
+        L.append(f"   highest stable clock at <= {tag}: best {d['best']:.0f}, mean {d['mean']:.0f}, "
+                 f"worst {d['worst']:.0f} MHz" + (f"  ({d['ceiling']} core(s) hit the clock ceiling)" if d["ceiling"] else ""))
+        L.append("       " + "  ".join(f"c{k} {r['clk']:.0f}" + ("^" if r.get("limit") == "ceiling" else "")
+                                       + (f" (CO {r['co']})" if r.get("co") is not None else "")
+                                       for k, r in d["cores"].items() if r.get("clk")))
+        if d["ceiling"]:
+            L.append("       ^ reached the CCD's boost ceiling, not its limit (raise Boost Override in the BIOS)")
     m = ccd_map(res, ccd)
     if not m:
-        return []
-    L = ["   static V/F map: lowest stable voltage per core (margin below stock)"]
+        return L
+    L.append("   static V/F map: lowest stable voltage per core (margin below stock)")
     for t, d in m.items():
         name = "max boost" if t == "max" else f"{t} MHz"
         cells = "  ".join(f"c{k} {r['min_v']:.3f}" + (f" (-{r['margin_mv']:.0f})" if r.get("margin_mv") else "")

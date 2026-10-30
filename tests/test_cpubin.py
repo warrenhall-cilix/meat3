@@ -283,3 +283,128 @@ class MapTest(unittest.TestCase):
         out = cpubin.compare(a, b)
         self.assertIn("stable V 4500, mean core", out)
         self.assertIn("V-Cache CCD: B is better (stable voltage 25 mV lower)", out)
+
+
+class AtVoltageTest(unittest.TestCase):
+    """Highest stable clock per core at a voltage cap, on the fake chip."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def run_av(self, name, maxclk, volt, offset_mv=0.0, mv_per_co=4.0):
+        from meat3 import cpumap
+        root = os.path.join(self.tmp, name)
+        make_sys(root)
+        fake = FakeChip(root, offset_mv)
+        fake.co = {k: 0 for k in CORES}
+        base = fake.sensors
+
+        def sensors():
+            s = base()
+            for k in CORES:
+                s[f"cpu0.pmt.core{k}.volt"]["value"] += mv_per_co / 1000 * fake.co[k]
+            return s
+        fake.sensors = sensors
+        sysfs = cpubin.Sysfs(root)
+        b = cpubin.Binner(sysfs, fake, load=fake.load, sleep=lambda s: None, settle_s=0, sample_s=2,
+                          log=lambda *a: None)
+        res = {"label": name, "ccds": sysfs.ccds}
+        core_of = {c: k for k, cpus in CORES.items() for c in cpus}
+
+        def apply_co(k, v):
+            fake.co[k] = v
+
+        def suite(cpu):
+            k = core_of[cpu]
+            clk = min(fake.cap_mhz(cpu), fake.fmax[k])                   # the clock it runs under load
+            return (True, "") if clk <= maxclk[k] + 30 else (False, "verify failed")
+        mp = cpumap.Mapper(b, res, apply_co, suite, lambda: None, log=lambda *a: None)
+        mp.run_at_voltage(list(CORES), volt, 4500, 100)
+        return res, root, fake
+
+    def test_clock_limits_and_ceiling(self):
+        from meat3 import cpumap
+        # fused ceilings in the fake: 5250/5200 (V-Cache), 5700/5650; amd-pstate scale 0.9 caps at 5130 MHz
+        res, root, fake = self.run_av("A", {0: 4800, 1: 4940, 2: 5200, 3: 9999}, 1.20)
+        av = res["map"]["at_voltage"]["1.200V"]
+        self.assertEqual(cpumap.at_voltage_result(av["0"])["target"], 4800)
+        self.assertEqual(cpumap.at_voltage_result(av["1"])["target"], 4950)      # 4900 pass, 5000 fail, 4950 pass
+        self.assertEqual(av["1"]["fail"], 5000)
+        r3 = cpumap.at_voltage_result(av["3"])
+        self.assertEqual(r3["limit"], "ceiling")                                # never failed: hit the clock cap
+        for k in CORES:
+            for p in av[str(k)]["passes"]:
+                self.assertLessEqual(p["volt"], 1.202)                          # always within the voltage budget
+        self.assertEqual(fake.co, {k: 0 for k in CORES})                         # CO back to 0
+        text = cpubin.report(res)
+        self.assertIn("highest stable clock at <= 1.200V", text)
+        self.assertIn("hit the clock ceiling", text)
+
+    def test_voltage_budget_needs_co(self):
+        from meat3 import cpumap
+        # at 1.05 V the fake needs negative CO above ~4400 MHz; past CO -50 it stops with "CO limit"
+        res, _, _ = self.run_av("A", {k: 9999 for k in CORES}, 1.05, mv_per_co=1.0)
+        av = res["map"]["at_voltage"]["1.050V"]
+        r = cpumap.at_voltage_result(av["2"])
+        self.assertLess(r["co"], 0)
+        self.assertEqual(r["limit"], "CO limit")
+
+    def test_compare_on_clock_at_voltage(self):
+        a, _, _ = self.run_av("A", {0: 4600, 1: 4600, 2: 4700, 3: 4700}, 1.20)
+        b, _, _ = self.run_av("B", {0: 4900, 1: 4900, 2: 4700, 3: 4700}, 1.20)
+        out = cpubin.compare(a, b)
+        self.assertIn("clock at 1.200V, mean core", out)
+        self.assertIn("V-Cache CCD: B is better (300 MHz more at the same voltage)", out)
+        self.assertIn("frequency CCD: too close to call", out)
+
+    def test_crash_recovery(self):
+        from meat3 import cpumap
+        res = {"map": {"current_av": {"tag": "1.250V", "core": "3", "target": 5600, "co": -20},
+                       "at_voltage": {"1.250V": {"3": {"passes": [{"target": 5500, "co": -15}],
+                                                        "current": {"target": 5600}}}}}}
+        mp = cpumap.Mapper(None, res, None, None, lambda: None)
+        self.assertIn("marked unstable", mp.recover_at_voltage())
+        self.assertEqual(res["map"]["at_voltage"]["1.250V"]["3"]["fail"], 5600)
+
+
+class FixedVoltageTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def make(self, rail_v):
+        from meat3 import cpumap
+        make_sys(self.tmp)
+        fake = FakeChip(self.tmp)
+        base = fake.sensors
+
+        def sensors():                                   # BIOS fixed Vcore: every core reads the rail
+            s = base()
+            for k in CORES:
+                s[f"cpu0.pmt.core{k}.volt"]["value"] = rail_v
+            return s
+        fake.sensors = sensors
+        b = cpubin.Binner(cpubin.Sysfs(self.tmp), fake, load=fake.load, sleep=lambda s: None, settle_s=0,
+                          sample_s=2, log=lambda *a: None)
+        co_calls = []
+        core_of = {c: k for k, cpus in CORES.items() for c in cpus}
+        suite = lambda cpu: (True, "") if min(fake.cap_mhz(cpu), fake.fmax[core_of[cpu]]) <= 4900 + 30 else (False, "x")
+        res = {"label": "F", "ccds": b.sys.ccds}
+        return cpumap.Mapper(b, res, lambda k, v: co_calls.append((k, v)), suite, lambda: None,
+                             log=lambda *a: None), res, co_calls
+
+    def test_fixed_voltage_never_touches_co(self):
+        from meat3 import cpumap
+        mp, res, co_calls = self.make(1.248)
+        mp.run_at_voltage([0, 2], 1.25, 4500, 100, fixed=True)
+        av = res["map"]["at_voltage"]["1.250V fixed"]
+        self.assertEqual(cpumap.at_voltage_result(av["0"])["target"], 4900)
+        self.assertTrue(all(v == 0 for _, v in co_calls))                  # only "back to 0"
+        self.assertEqual(av["2"]["passes"][0]["volt"], 1.248)
+
+    def test_fixed_voltage_wrong_reading_stops(self):
+        mp, _, _ = self.make(1.33)                                           # BIOS setting didn't take
+        with self.assertRaises(RuntimeError) as e:
+            mp.run_at_voltage([0], 1.25, 4500, 100, fixed=True)
+        self.assertIn("check the Vcore setting", str(e.exception))
