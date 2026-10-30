@@ -162,6 +162,9 @@ else
     sudo rm -f /usr/share/applications/meat3.desktop
 fi
 sudo /usr/local/bin/meat3-web --gen-token >/dev/null      # web UI login token (kept on reinstall)
+# flush everything to disk before the daemon (and maybe an overclocking test) starts: a hard hang soon
+# after an install otherwise leaves files such as VERSION/SOURCE empty, and the updater can't find the checkout
+sync
 sudo systemctl daemon-reload
 sudo systemctl enable meat3d.service
 sudo systemctl restart meat3d.service     # restart, not just start: a running daemon keeps old code
