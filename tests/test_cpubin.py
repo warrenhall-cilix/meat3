@@ -240,6 +240,24 @@ class MapTest(unittest.TestCase):
             with open(os.path.join(root, f"devices/system/cpu/cpu{c}/cpufreq/scaling_max_freq")) as f:
                 self.assertEqual(int(f.read()), MAX_KHZ)
 
+    def test_other_cores_held_low_while_mapping(self):
+        from meat3 import cpumap
+        root = os.path.join(self.tmp, "H")
+        make_sys(root)
+        fake = FakeChip(root)
+        sysfs = cpubin.Sysfs(root)
+        b = cpubin.Binner(sysfs, fake, load=fake.load, sleep=lambda s: None, settle_s=0, sample_s=2,
+                          log=lambda *a: None)
+        mp = cpumap.Mapper(b, {"label": "H"}, lambda k, v: None, lambda cpu: (True, ""), lambda: None)
+        mp.calibrate(2, 4500)
+        caps = {}
+        for c in range(8):
+            with open(os.path.join(root, f"devices/system/cpu/cpu{c}/cpufreq/scaling_max_freq")) as f:
+                caps[c] = int(f.read())
+        self.assertEqual({caps[c] for c in (0, 1, 3, 4, 5, 7)}, {int(MAX_KHZ * cpumap.OTHERS_FRAC)})
+        self.assertGreater(caps[2], caps[0])                             # core 2 (cpus 2, 6) at its target
+        self.assertEqual(caps[2], caps[6])
+
     def test_floor_marked_and_crash_recovery(self):
         from meat3 import cpumap
         res, _, _ = self.run_map("A", {0: -99, 1: -99, 2: -99, 3: -99}, clocks="4500")

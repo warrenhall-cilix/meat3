@@ -33,6 +33,7 @@ HEAVY_METHODS = ["matrixprod", "fft", "int128decimal64", "double", "int64", "pri
 MAP_CLOCKS = "4500,5000,5300,max"
 CO_PROBE = -15                 # mapping check: this CO on one core must lower that core's voltage
 CO_PROBE_MIN_DROP_V = 0.015
+OTHERS_FRAC = 0.5              # other cores' limit while one core is mapped (~2.9 GHz on a 9950X3D)
 
 
 def parse_clocks(text: str) -> list:
@@ -113,9 +114,19 @@ class Mapper:
         finally:
             self.b.sample_s = old
 
+    def hold_others(self, k: int) -> None:
+        """All cores share one voltage rail that follows the highest request. Keep every other core at a
+        low clock so the core under test sets the rail: otherwise a background task waking another core
+        at full boost raises the voltage, hiding this core's real voltage and propping up its stability."""
+        mine = set(self.cpus_of(k))
+        for c, top in self.b.orig_max.items():
+            if c not in mine and top:
+                self.b.sys.set_max_khz([c], int(top * OTHERS_FRAC))
+
     def calibrate(self, k: int, target) -> tuple[Optional[int], Optional[float]]:
         """Frequency limit (kHz) at which core k runs `target` MHz (+-25), and the clock it runs."""
         cpus = self.cpus_of(k)
+        self.hold_others(k)
         top = max(self.b.orig_max[c] or 0 for c in cpus)
         if target == "max":
             self.b.sys.set_max_khz(cpus, top)
