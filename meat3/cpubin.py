@@ -36,7 +36,7 @@ import sys
 import time
 from typing import Callable, Optional
 
-from meat3 import cpumap, cpuvalidate
+from meat3 import ccdtest, cpumap, cpuvalidate
 
 STORE = "/var/lib/meat3/bin"
 SOCK = "/run/meat3/meat3.sock"
@@ -408,6 +408,7 @@ def report(res: dict) -> str:
                          f"{fmt(b.get('power'), ' W', 1):>7} {fmt(b.get('temp'), ' °C'):>6}")
         L += cpumap.report_lines(res, ccd)
         L += cpuvalidate.report_lines(res, ccd)
+        L += ccdtest.report_lines(res, ccd)
     return "\n".join(L)
 
 
@@ -464,6 +465,14 @@ def compare(a: dict, b: dict) -> str:
                 better = a["label"] if d > 0 else b["label"]
                 L.append(f"  {name:32}{b['label']} {'+' if d >= 0 else ''}{d:.0f} mV vs {a['label']}"
                          f"  -> {better} {'needs less' if abs(d) >= 5 else '(within noise)'}")
+        # all-core per CCD at a fixed voltage: the number an all-core overclock runs at
+        ac_d = []
+        for tag in sorted(set((a.get("map") or {}).get("allcore", {})) & set((b.get("map") or {}).get("allcore", {}))):
+            xa = a["map"]["allcore"][tag]["ccds"].get(str(roles_a[role]["ccd"]), {}).get("result_mhz")
+            xb = b["map"]["allcore"][tag]["ccds"].get(str(roles_b[role]["ccd"]), {}).get("result_mhz")
+            L.append(f"  {'all cores loaded at ' + tag:32}{fmt(xa, ' MHz'):>12}{fmt(xb, ' MHz'):>12}")
+            if xa and xb:
+                ac_d.append(xb - xa)
         # clocks at a fixed voltage, both chips
         av_a, av_b = cpumap.ccd_at_voltage(a, roles_a[role]), cpumap.ccd_at_voltage(b, roles_b[role])
         av_d = []
@@ -487,6 +496,11 @@ def compare(a: dict, b: dict) -> str:
         # The stable-voltage map is the strongest evidence (it's the stability-tested version).
         score = {a["label"]: 0.0, b["label"]: 0.0}
         why = []
+        if ac_d:
+            d = statistics.mean(ac_d)
+            if abs(d) >= 25:
+                score[b["label"] if d > 0 else a["label"]] += 3.0
+                why.append(f"{abs(d):.0f} MHz more all-core at the same voltage")
         if av_d:
             d = statistics.mean(av_d)
             if abs(d) >= 25:
@@ -580,6 +594,45 @@ class DaemonOc:
 
     def freq_core(self, k: int, mhz: int) -> None:
         self._apply(f"oc_freq_core{k}", int(mhz))
+
+
+# ----------------------------------------------------------------------------- all-core per CCD
+def run_allcore(args, res: dict, b: "Binner", d: Daemon) -> int:
+    from meat3 import ccdtest, cotune
+    miss = cpuvalidate.tools_missing()
+    if miss:
+        print("needs " + ", ".join(miss))
+        return 2
+    if not 0.9 <= args.allcore <= 1.40:
+        print("--allcore voltage must be between 0.90 and 1.40 V")
+        return 2
+    oc = DaemonOc(d, b.p)
+    why = oc.ready()
+    if why:
+        print(f"stopped: {why}")
+        return 2
+    d2 = Daemon()                                      # the sampler thread gets its own connection
+
+    def sensors():
+        return {x["id"]: x["value"] for x in d2.call({"cmd": "snapshot"}).get("sensors", [])}
+
+    def oc_active():
+        return bool((d.controls().get(f"{b.p}.smu.oc_mode") or {}).get("value"))
+    km = cotune.Kmsg()
+    t = ccdtest.CcdTest(res, args.allcore, b.sys, oc, oc_active, cpuvalidate.run_phase, km.bad_lines,
+                        lambda cores, cpus: b.measure(cores, cpus),
+                        lambda cores: ccdtest.Sampler(sensors, cores, b.p), lambda: save(res),
+                        start=args.cc_start, step=args.cc_step, phase_s=args.cc_phase_s, chip_s=args.cc_chip_s)
+    try:
+        note = t.recover()
+        if note:
+            print("!!", note)
+        print(f"== all-core per CCD at {args.allcore:.3f} V: from {args.cc_start} MHz in {args.cc_step} MHz steps, "
+              f"{', '.join(ccdtest.CCD_PHASES)} for {args.cc_phase_s} s each per step; then the whole chip")
+        t.run(b.sys.ccds)
+    finally:
+        km.close()
+    return 0
 
 
 # ----------------------------------------------------------------------------- validation (Prime95/y-cruncher)
@@ -735,11 +788,15 @@ def run(args) -> int:
                     except Exception:
                         pass
             save(res)
+        if args.allcore:
+            rc = run_allcore(args, res, b, d)
+            if rc != 0:
+                return rc
         if args.map or args.at_voltage:
             rc = run_map(args, res, b, d)
             if rc != 0:
                 return rc
-        if not args.co and not args.boost and not args.map and not args.at_voltage:
+        if not args.co and not args.boost and not args.map and not args.at_voltage and not args.allcore:
             print("== fused data")
             res["fused"] = b.fused()
             if any(res["fused"]["co_at_start"].values()):
@@ -783,6 +840,13 @@ def main(argv=None) -> int:
     ap.add_argument("--manual", action="store_true",
                     help="--at-voltage: use manual overclocking mode (fixed voltage and exact per-core clocks "
                          "set through the SMU; needs a passed --oc-probe)")
+    ap.add_argument("--allcore", type=float, metavar="V",
+                    help="highest clock each CCD holds with all its cores loaded at this voltage, then the whole "
+                         "chip (manual mode; needs a passed --oc-probe)")
+    ap.add_argument("--cc-start", type=int, default=5000, help="--allcore: first clock, MHz (default 5000)")
+    ap.add_argument("--cc-step", type=int, default=100, help="--allcore: clock step, MHz (default 100)")
+    ap.add_argument("--cc-phase-s", type=int, default=180, help="--allcore: seconds per test per step (default 180)")
+    ap.add_argument("--cc-chip-s", type=int, default=600, help="--allcore: seconds per whole-chip test (default 600)")
     ap.add_argument("--validate", action="store_true",
                     help="--at-voltage V --manual: prove the screened clocks with Prime95 and y-cruncher per core, "
                          "then the whole chip (hours)")
