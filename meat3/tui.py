@@ -142,10 +142,11 @@ def fv(s: Optional[dict], key: str = "value") -> str:
 # Overview headline rows per device kind: (sensor id regex after "<prefix>.", short label, bar max)
 # bar max: number, "@<id suffix>" (another sensor's value), or None (no bar)
 HEADLINES = {
-    "nv": [(r"clk\.gpc$", "Core clock", "@clk.gpc_max"), (r"clk\.mem_eff$", "Memory", None),
+    "nv": [(r"clk\.gpc$", "Core clock", "@clk.gpc_max"), (r"(u|util|load)\.gpu$", "Load", 100),
+           (r"mem\.pct$", "VRAM used", 100), (r"clk\.mem_eff$", "Memory", None),
            (r"clk\.xbar$", "XBAR", None), (r"v\.nvvdd$", "NVVDD", None), (r"v\.msvdd$", "MSVDD", None),
            (r"t\.gpu$", "GPU temp", 100), (r"t\.hotspot$", "Hotspot", 110), (r"t\.mem$", "GDDR temp", 110),
-           (r"pwr\.board_real$", "Power", "@pwr.limit_real"), (r"util\.gpu$|load\.gpu$", "Load", 100),
+           (r"pwr\.board_real$", "Power", "@pwr.limit_real"),
            (r"pins\.a$", "12V-2x6 total", 55.0), (r"pins\.max_a$", "Worst pin", 9.5),
            (r"fan\d\.pct$", "Fan", 100)],
     "amdgpu": [(r"gm\.(average|current)_gfxclk_frequency$", "GFX clock", None),

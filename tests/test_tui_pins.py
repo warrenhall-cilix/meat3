@@ -105,5 +105,17 @@ class PinKeysTest(unittest.TestCase):
         self.assertEqual(t.view, 1)
 
 
+class OverviewNvidiaTest(unittest.TestCase):
+    def test_load_and_vram_rows_use_the_real_backend_ids(self):
+        # ids as meat3/backends/nvidia.py names them (the mock daemon uses util.gpu instead)
+        sensors = {sid: {"id": sid, "group": "GPU 0: RTX 5080/x", "label": sid, "unit": u, "value": v}
+                   for sid, u, v in (("nv0.clk.gpc", "MHz", 2800), ("nv0.u.gpu", "%", 97),
+                                     ("nv0.mem.pct", "%", 41.5), ("nv0.t.gpu", "°C", 60))}
+        rows = tui.overview_rows("nv0", list(sensors), sensors)
+        self.assertEqual([r[0] for r in rows], ["Core clock", "Load", "VRAM used", "GPU temp"])
+        self.assertEqual(rows[1][1]["value"], 97)
+        self.assertEqual(rows[1][2], 100)                       # bar out of 100 %
+
+
 if __name__ == "__main__":
     unittest.main()
