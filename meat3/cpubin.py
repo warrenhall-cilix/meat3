@@ -36,7 +36,7 @@ import sys
 import time
 from typing import Callable, Optional
 
-from meat3 import cpumap
+from meat3 import cpumap, cpuvalidate
 
 STORE = "/var/lib/meat3/bin"
 SOCK = "/run/meat3/meat3.sock"
@@ -407,6 +407,7 @@ def report(res: dict) -> str:
                          f"   | {fmt(b.get('clk'), ' MHz'):>9} {fmt(b.get('volt'), ' V', 3):>8} "
                          f"{fmt(b.get('power'), ' W', 1):>7} {fmt(b.get('temp'), ' °C'):>6}")
         L += cpumap.report_lines(res, ccd)
+        L += cpuvalidate.report_lines(res, ccd)
     return "\n".join(L)
 
 
@@ -581,6 +582,41 @@ class DaemonOc:
         self._apply(f"oc_freq_core{k}", int(mhz))
 
 
+# ----------------------------------------------------------------------------- validation (Prime95/y-cruncher)
+def run_validate(args, res: dict, b: "Binner", d: Daemon, cores: list[int]) -> int:
+    from meat3 import cotune, cpuvalidate
+    miss = cpuvalidate.tools_missing()
+    if miss:
+        print("needs " + ", ".join(miss))
+        return 2
+    oc = DaemonOc(d, b.p)
+    why = oc.ready()
+    if why:
+        print(f"stopped: {why}")
+        return 2
+    tag = f"{args.at_voltage:.3f}V manual"
+    if not (res.get("map") or {}).get("at_voltage", {}).get(tag):
+        print(f"no screening results at {tag}: run --at-voltage {args.at_voltage} --manual first")
+        return 2
+    km = cotune.Kmsg()
+
+    def measure(k, cpu):
+        return b.measure([k], [cpu])
+    v = cpuvalidate.Validator(res, tag, b.sys, oc, cpuvalidate.run_phase, km.bad_lines, lambda: save(res), measure,
+                              phase_s=args.val_phase_s, step=args.val_step)
+    try:
+        note = v.recover()
+        if note:
+            print("!!", note)
+        n = len(cores) * len(cpuvalidate.PHASES) * args.val_phase_s + 2 * args.val_all_s
+        print(f"== validating {len(cores)} cores at {args.at_voltage:.3f} V: {', '.join(cpuvalidate.PHASES)}, "
+              f"{args.val_phase_s} s each, then the whole chip (about {n / 3600:.1f} h without failures)")
+        v.run(cores, args.at_voltage, args.val_all_s)
+    finally:
+        km.close()
+    return 0
+
+
 # ----------------------------------------------------------------------------- static V/F map
 def run_map(args, res: dict, b: "Binner", d: Daemon) -> int:
     from meat3 import cotune
@@ -619,6 +655,8 @@ def run_map(args, res: dict, b: "Binner", d: Daemon) -> int:
                 return 2
             print(f"== highest stable clock per core at <= {args.at_voltage:.3f} V: {len(cores)} cores, from "
                   f"{args.av_start} MHz in {args.av_step} MHz steps, {args.step_time} s per step")
+            if args.manual and args.validate:
+                return run_validate(args, res, b, d, cores)
             if args.manual:
                 oc = DaemonOc(d, b.p)
                 why = oc.ready()
@@ -745,6 +783,12 @@ def main(argv=None) -> int:
     ap.add_argument("--manual", action="store_true",
                     help="--at-voltage: use manual overclocking mode (fixed voltage and exact per-core clocks "
                          "set through the SMU; needs a passed --oc-probe)")
+    ap.add_argument("--validate", action="store_true",
+                    help="--at-voltage V --manual: prove the screened clocks with Prime95 and y-cruncher per core, "
+                         "then the whole chip (hours)")
+    ap.add_argument("--val-phase-s", type=int, default=300, help="--validate: seconds per test per core (default 300)")
+    ap.add_argument("--val-all-s", type=int, default=900, help="--validate: seconds per all-core test (default 900)")
+    ap.add_argument("--val-step", type=int, default=25, help="--validate: MHz down after a failure (default 25)")
     ap.add_argument("--oc-probe", action="store_true",
                     help="verify manual overclocking mode and its voltage encoding on this chip (run once, at idle)")
     ap.add_argument("--fixed-voltage", action="store_true",

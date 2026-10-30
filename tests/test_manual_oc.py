@@ -227,3 +227,88 @@ class ManualRunTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ValidateTest(unittest.TestCase):
+    """--validate on a fake chip: per-core phases from the screened clock, step-down on failure, crash
+    recovery, then the whole chip at each CCD's weakest core."""
+
+    def setUp(self):
+        sys.path.insert(0, HERE)
+        import test_cpubin as tc
+        from meat3 import cpubin
+        self.tc = tc
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        tc.make_sys(self.tmp)
+        self.sysfs = cpubin.Sysfs(self.tmp)
+        self.clk = {k: 3000 for k in tc.CORES}
+        self.res = {"label": "V", "ccds": self.sysfs.ccds, "map": {"at_voltage": {"1.250V manual": {
+            str(k): {"passes": [{"target": t, "co": 0}], "fail": t + 100, "done": True}
+            for k, t in {0: 5750, 1: 5800, 2: 5900, 3: 5850}.items()}}}}
+        test = self
+
+        class Oc:
+            calls = []
+            def mode(self, on): self.calls.append(("mode", on))
+            def vid(self, v): self.calls.append(("vid", v))
+            def freq_all(self, f): test.clk.update({k: f for k in test.clk})
+            def freq_core(self, k, f): test.clk[k] = f
+        self.oc = Oc()
+
+    def validator(self, limits, all_limit=None, phase_fail=None):
+        from meat3 import cpuvalidate
+        core_of = {c: k for k, cpus in self.tc.CORES.items() for c in cpus}
+        log = []
+
+        def run_phase(ph, cpus, secs):
+            log.append((ph, tuple(cpus), dict(self.clk)))
+            if len(cpus) > 1:                                            # all-core
+                return (True, "ok") if all_limit(self.clk) else (False, "Hardware failure detected")
+            k = core_of[cpus[0]]
+            lim = limits[k] if not phase_fail or ph != phase_fail[0] else phase_fail[1].get(k, limits[k])
+            return (True, "ok") if self.clk[k] <= lim else (False, "FATAL ERROR: Rounding was 0.5")
+        v = cpuvalidate.Validator(self.res, "1.250V manual", self.sysfs, self.oc, run_phase, lambda: [],
+                                  lambda: None, lambda k, cpu: {"clk": self.clk[k]}, phase_s=1, step=25,
+                                  log=lambda *a: None)
+        return v, log
+
+    def test_per_core_and_all_core(self):
+        from meat3 import cpuvalidate
+        # cores are a bit weaker under the real tools than the screening said; AVX-512 is worst for core 2
+        v, log = self.validator({0: 5700, 1: 5800, 2: 5900, 3: 5800}, all_limit=lambda c: max(c.values()) <= 5725,
+                                phase_fail=("p95-avx512", {2: 5850}))
+        v.run([0, 1, 2, 3], 1.25, 1)
+        cores = self.res["map"]["validate"]["1.250V manual"]["cores"]
+        self.assertEqual({k: c["validated_mhz"] for k, c in cores.items()},
+                         {"0": 5700, "1": 5800, "2": 5850, "3": 5800})
+        self.assertIn("5900 MHz p95-avx512", cores["2"]["fail_log"][0])
+        ccds = self.res["map"]["validate"]["1.250V manual"]["ccds"]
+        # CCD clock = weakest core (5700 / 5800), then the whole chip needs <= 5725: CCD1 steps down
+        self.assertEqual(ccds["0"]["validated_mhz"], 5700)
+        self.assertEqual(ccds["1"]["validated_mhz"], 5725)
+        self.assertEqual(self.oc.calls[-1], ("mode", False))
+        phases_core0 = [p for p, cpus, clk in log if cpus == (0,)]
+        self.assertEqual(phases_core0[:2], ["p95-sse", "p95-sse"])            # 5750, 5725 fail straight away
+        at_5700 = [p for p, cpus, clk in log if cpus == (0,) and clk[0] == 5700]
+        self.assertEqual(at_5700, cpuvalidate.PHASES)                          # every phase at the final clock
+        self.assertIn("validated at 1.250V manual", "\n".join(cpuvalidate.report_lines(self.res, self.sysfs.ccds[0])))
+
+    def test_crash_recovery_steps_down(self):
+        v, _ = self.validator({k: 9999 for k in range(4)})
+        self.res["map"]["validate"]["1.250V manual"]["current"] = {"core": 1, "phase": "p95-avx512", "mhz": 5800}
+        self.assertIn("marked unstable", v.recover())
+        c = self.res["map"]["validate"]["1.250V manual"]["cores"]["1"]
+        self.assertEqual((c["mhz"], c["fails"]), (5775, [5800]))
+
+    def test_p95_config_modes(self):
+        from meat3 import cpuvalidate
+        sse = cpuvalidate.p95_config("p95-sse")
+        self.assertIn("CpuSupportsAVX=0", sse)
+        self.assertIn("MaxTortureFFT=64", sse)
+        a512 = cpuvalidate.p95_config("p95-avx512")
+        self.assertIn("CpuSupportsAVX512F=1", a512)
+        self.assertIn("MinTortureFFT=448", cpuvalidate.p95_config("p95-l3"))
+        y = cpuvalidate.yc_config([8], 30, 256 << 20)
+        self.assertIn("LogicalCores : [8]", y)
+        self.assertIn('"VT3"', y)
