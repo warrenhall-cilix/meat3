@@ -28,7 +28,7 @@ import time
 from typing import Callable, Optional
 
 PHASES = ["p95-sse", "p95-avx2", "p95-avx512", "p95-l3", "ycruncher"]
-YC_BIN = "/usr/lib/y-cruncher/Binaries/24-ZN5 ~ Komari"
+YC_BIN = "/usr/lib/y-cruncher/Binaries/24-ZN5 ~ Komari"   # the Zen 5 build: an executable, not a folder
 YC_TESTS = ["BKT", "BBP", "SFTv4", "SNT", "SVT", "FFTv4", "N63", "VT3"]
 P95_FAIL = re.compile(r"FATAL ERROR|TORTURE TEST FAILED|Hardware failure detected|ILLEGAL SUMOUT|SUM\(INPUTS\) != "
                       r"SUM\(OUTPUTS\)|ROUND ?OFF|rounding was|error|Error", re.I)
@@ -100,9 +100,7 @@ def yc_config(cpus: list[int], seconds_per_test: int, mem_bytes: int) -> str:
 
 
 def run_ycruncher(cpus: list[int], seconds: int, mem_bytes: Optional[int] = None) -> tuple[bool, str]:
-    exe = os.path.join(YC_BIN, "y-cruncher")
-    if not os.path.exists(exe):
-        exe = "y-cruncher"
+    exe = YC_BIN if os.path.isfile(YC_BIN) else "y-cruncher"
     d = tempfile.mkdtemp(prefix="meat3-yc-")
     try:
         per = max(10, seconds // len(YC_TESTS))
@@ -130,7 +128,7 @@ def tools_missing() -> list[str]:
     miss = []
     if not shutil.which("mprime"):
         miss.append("mprime (paru -S mprime-bin)")
-    if not (os.path.exists(os.path.join(YC_BIN, "y-cruncher")) or shutil.which("y-cruncher")):
+    if not (os.path.isfile(YC_BIN) or shutil.which("y-cruncher")):
         miss.append("y-cruncher (paru -S y-cruncher)")
     return miss
 
