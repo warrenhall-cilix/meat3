@@ -104,6 +104,14 @@ activity below 20 % or clock below 500 MHz) are ignored. Load the GPU for a few 
 the trace moves when you change the offsets, which makes the effect of an undervolt visible as a curve
 rather than a single number. The samples live in the daemon and are lost on restart.
 
+## Throttle timeline
+
+Besides the per-class SMU14 throttle flags, the backend adds one 0/1 row per throttle reason that has
+fired since the daemon started (`amdgpuN.smu14.throttle.bit.<reason>`, e.g. `ppt0`, `tdc_gfx`,
+`temp_hotspot`) and a time-weighted duty figure per class over the last 60 s
+(`amdgpuN.smu14.throttle.duty.{power,current,thermal,other,any}`, in %). Add the duty rows to the
+Graphs tab while gaming to see which limit is actually holding the clocks back and how often.
+
 ## `meat3-gputune`: undervolt finder
 
 Lowers the GFX voltage offset step by step while the GPU is under heavy load, and finds the lowest
@@ -128,6 +136,16 @@ sudo meat3-gputune --save-boot          # apply it whenever meat3d starts
 | `--min-load` | 85% | A step only counts while average GFX activity is at least this |
 | `--load CMD` | | Command that loads the GPU. Restarted if it exits; a non-zero exit fails the step |
 | `--gpu N` | First GPU with a voltage offset | |
+| `--clock` | off | Second phase: raise the GFX clock offset at the found undervolt |
+| `--clock-step` | 25 MHz | Clock step size |
+| `--clock-max` | 400 MHz | Highest clock offset to try |
+| `--clock-margin` | 25 MHz | Taken off the last passing clock offset |
+
+Every step records the average GFX clock, board power, PPT throttle duty and peak hotspot while it
+ran, and `--status` prints them as a table, so you can see what each 10 mV bought (on a
+power-limited RDNA4 card a good undervolt shows up as a higher clock at the same watts). With
+`--clock` the tuner then applies the undervolt result and raises the GFX clock offset step by step
+under the same pass/fail rules; `--apply` and `--save-boot` set both results.
 
 **When a step fails:**
 - an amdgpu error in the kernel log: a ring or job timeout, a GPU reset, a page fault or a hang;

@@ -706,6 +706,36 @@ class TestRdna4Extras(TreeCase):
         for k in ("power", "current", "thermal", "other"):
             self.assertIn(f"amdgpu0.smu14.throttle.{k}", ss)
 
+    def test_smu14_throttle_timeline(self):
+        be = self.be
+        clock = [100.0]
+        be._now = lambda: clock[0]
+        dev = os.path.join(self.root, "sys/class/drm/card0/device/gpu_metrics")
+
+        def poll(mask, dt):
+            clock[0] += dt
+            with open(dev, "wb") as fh:
+                fh.write(fx.gpu_metrics_v1_3_blob(dict(fx.GM_VALUES, throttle_status=mask)))
+            return {s.id: s for s in be.sensors()}
+
+        ss = poll(0, 0)
+        self.assertNotIn("amdgpu0.smu14.throttle.bit.ppt0", ss)          # nothing has fired yet
+        self.assertEqual(ss["amdgpu0.smu14.throttle.duty.any"].value, 0.0)
+        ss = poll(1 << 14, 10)                                            # PPT0 for 10 s
+        ss = poll(1 << 14, 10)
+        ss = poll(1 << 1, 10)                                             # then hotspot for 10 s
+        ss = poll(0, 10)
+        self.assertEqual(ss["amdgpu0.smu14.throttle.bit.ppt0"].value, 0.0)
+        self.assertEqual(ss["amdgpu0.smu14.throttle.bit.temp_hotspot"].value, 0.0)
+        self.assertNotIn("amdgpu0.smu14.throttle.bit.tdc_gfx", ss)
+        self.assertEqual(ss["amdgpu0.smu14.throttle.duty.power"].value, 50.0)    # 20 of 40 s
+        self.assertEqual(ss["amdgpu0.smu14.throttle.duty.thermal"].value, 25.0)
+        self.assertEqual(ss["amdgpu0.smu14.throttle.duty.any"].value, 75.0)
+        self.assertEqual(ss["amdgpu0.smu14.throttle.duty.power"].unit, "%")
+        ss = poll(0, 100)                                                 # window rolls everything out
+        self.assertEqual(ss["amdgpu0.smu14.throttle.duty.any"].value, 0.0)
+        self.assertIn("amdgpu0.smu14.throttle.bit.ppt0", ss)              # but the row stays
+
     def test_power_cap_readback_reported(self):
         def writer(path, data):
             self.rec(path, data)

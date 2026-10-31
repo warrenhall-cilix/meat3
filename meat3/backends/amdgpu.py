@@ -301,6 +301,9 @@ class AmdGpuBackend(Backend):
         self._seen_rows: dict[str, dict] = {}
         self._hwmon_rows = self._scan_hwmon()
         self.vf_measured = VfMeasured()
+        self._thr_hist: list[tuple[float, int]] = []    # (time, SMU14 throttle mask) for the duty window
+        self._thr_seen_bits: list[int] = []             # bits that have ever been set, in first-seen order
+        self._now = time.monotonic                      # tests inject a clock
         self.pptable = None
         self.is_smu14_dgpu = bool(self.mp1 and self.mp1[:2] == (14, 0) and not self.is_apu)
         self.full_slot = 0
@@ -671,7 +674,40 @@ class AmdGpuBackend(Backend):
             out.append(Sensor(f"{P}.smu14.throttle.{key}", g, f"{label} (SMU14)",
                               None if val is None else float(any(val & (1 << b) for b in bits)), "", 0,
                               "1 = throttling; bits " + ", ".join(names)))
+        # timeline: one 0/1 row per reason that has ever fired (so the list stays short), and the share
+        # of the last THR_WINDOW_S seconds each class spent throttling (graph these to see what limits you)
+        now = self._now()
+        if val is not None:
+            self._thr_hist.append((now, val))
+            for b in range(32):
+                if val & (1 << b) and b not in self._thr_seen_bits:
+                    self._thr_seen_bits.append(b)
+        cut = now - self.THR_WINDOW_S
+        while len(self._thr_hist) > 1 and self._thr_hist[1][0] <= cut:   # keep one sample before the cut
+            self._thr_hist.pop(0)
+        for b in self._thr_seen_bits:
+            name = ppt.SMU14_THROTTLER_BITS.get(b, f"BIT{b}")
+            out.append(Sensor(f"{P}.smu14.throttle.bit.{name.lower()}", g, f"Limited by {name} (SMU14)",
+                              None if val is None else float(bool(val & (1 << b))), "", 0,
+                              f"1 while throttle_status bit {b} ({name}) is set"))
+        for key, label, bits in ppt.SMU14_THROTTLER_CLASSES + [("any", "Any limit", tuple(range(32)))]:
+            out.append(Sensor(f"{P}.smu14.throttle.duty.{key}", g, f"{label} duty, {self.THR_WINDOW_S:.0f} s",
+                              self._thr_duty(bits), "%", 0,
+                              f"share of the last {self.THR_WINDOW_S:.0f} s with any of these bits set"))
         return out
+
+    THR_WINDOW_S = 60.0
+
+    def _thr_duty(self, bits: tuple) -> Optional[float]:
+        """Time-weighted share of the history window in which any of `bits` was set."""
+        h = self._thr_hist
+        if len(h) < 2:
+            return None if not h else (100.0 if any(h[0][1] & (1 << b) for b in bits) else 0.0)
+        tot = h[-1][0] - h[0][0]
+        if tot <= 0:
+            return None
+        on = sum(t1 - t0 for (t0, m), (t1, _) in zip(h, h[1:]) if any(m & (1 << b) for b in bits))
+        return round(100.0 * on / tot, 1)
 
     def _board_limits(self) -> list[Sensor]:
         """Static limits from the SMU14 pp_table (firmware): rated clocks, power, current, temps."""
