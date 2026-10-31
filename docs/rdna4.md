@@ -15,6 +15,7 @@ On a real ASUS RX 9070 XT (VBIOS 115-G295BP00-100), Manjaro, kernel 7.2:
 | `meat3-gputune` | Uses the driver's own voltage offset, so it doesn't need the VRMs |
 | `meat3-skutable` and the patched amdgpu | Not yet tested on hardware |
 | TBP/TDC scaling (`vrm.tbp_scale`, `vrm.tdc_scale`) and `meat3-smufw` | Not yet tested on hardware (register map from fpsflow) |
+| `meat3-fasttiming` (Powerplay TA via ta_if) | Not yet tested on hardware (RE of the Windows driver + TA) |
 
 ## Hidden firmware metrics (`meat3_smu`)
 
@@ -160,6 +161,30 @@ not run. What the pin costs is any SMU fix released after June 2025 while it is 
 systems a pacman hook re-pins the file after `linux-firmware` upgrades; elsewhere `meat3-smufw` reports
 when a package update has replaced it. Reboot after `--pin` or `--restore`.
 
+## `meat3-fasttiming`: AMD "Fast Timing" memory timings (experimental)
+
+Adrenalin's memory "Fast Timing" is not an SMU setting, which is why Linux has no knob for it. The
+Windows driver loads a PSP trusted application ("AMD POWERPLAY Application"), pins the memory clock
+one DPM level below the top, asks the TA to program the UMC timing registers from the VBIOS timing
+table for a tighter bin, and releases the clock. meat3 ships the same AMD-signed TA images
+(`meat3/firmware/ppta/`, unmodified from the Windows package) and drives them through the kernel's
+own `ta_if` debugfs interface, so no kernel patch is needed. Everything is volatile.
+
+```sh
+sudo meat3-fasttiming status     # RDNA4 card, debugfs ta_if present, memory DPM levels
+sudo meat3-fasttiming load       # tries ppta_a.bin, then b, then c, until the PSP accepts one
+sudo meat3-fasttiming query      # TA command 2: timing ranges; status 0 = it runs and has a table
+sudo meat3-fasttiming enable     # TA command 0, level 1 (one timing bin tighter), clock pinned meanwhile
+sudo meat3-fasttiming disable    # TA command 1
+sudo meat3-fasttiming unload
+```
+
+Status of this feature: reverse-engineered from amdkmdag.sys 32.0.31044.16 and the TA itself, not
+yet run on a card. Expected failure modes are clean (the PSP refuses the image, or the TA returns
+status 1 because the ASIC id or the clock does not match its table). The unclean one is a badly
+programmed memory controller, which freezes the screen until a reboot. Run it on the desktop first,
+with `query` before `enable`, and measure with a memory-bound benchmark afterwards.
+
 ## `meat3-gputune`: undervolt finder
 
 Lowers the GFX voltage offset step by step while the GPU is under heavy load, and finds the lowest
@@ -247,4 +272,4 @@ unlike the VRM current scale.
 | Memory | 1500 in Linux units (stock 1259), about 20 → 24 Gbps |
 | Voltage | 1.2 V requested by the firmware; only a VRM offset goes beyond it |
 | Current | 330 A GFX, 88 A SoC |
-| Memory timings | No "fast timings" option on Linux |
+| Memory timings | `meat3-fasttiming` (experimental, via AMD's Powerplay TA) |
