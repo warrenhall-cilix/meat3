@@ -120,9 +120,13 @@ class ControlsTest(unittest.TestCase):
     def test_frequencies_and_leaving(self):
         self.apply("oc_mode", True)
         self.assertTrue(self.apply("oc_freq_all", 3000)[0])
-        self.assertTrue(self.apply("oc_freq_core9", 5400)[0])
+        self.assertTrue(self.apply("oc_freq_core9", 5400)[0])                  # per-core id still applies (tools)
         self.assertEqual(self.smu.sent[-1], ("oc_freq_core", [(1 << 28) | (1 << 20) | 5400]))
-        self.assertEqual(self.ctl()["cpu0.smu.oc_freq_core9"].value, 5400)
+        self.assertNotIn("cpu0.smu.oc_freq_core9", self.ctl())                 # but has no row of its own
+        self.assertIsNone(self.ctl()["cpu0.smu.oc_freq_ccd0"].value)          # CCD row: cores differ
+        self.assertTrue(self.apply("oc_freq_ccd0", 5400)[0])                   # one clock for the whole CCD
+        self.assertEqual(sum(1 for n, _ in self.smu.sent if n == "oc_freq_core"), 1 + 16)
+        self.assertEqual(self.ctl()["cpu0.smu.oc_freq_ccd0"].value, 5400)
         self.assertFalse(self.apply("oc_freq_core9", 7000)[0])
         self.assertFalse(self.apply("oc_freq_core99", 5000)[0])
         self.assertTrue(self.apply("oc_mode", False)[0])

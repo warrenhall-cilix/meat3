@@ -627,6 +627,41 @@ class TestSmu(Base):
         with open(os.path.join(self.smu, "mp1_smu_cmd"), "rb") as f:
             self.assertEqual(struct.unpack("<I", f.read())[0], 0x3E)
 
+    def test_per_ccd_controls(self):
+        class OkSmu(amd_smu.RyzenSmu):
+            sent = []
+
+            def send(self, name, args):
+                self.sent.append((name, list(args)))
+                return (1, [0xFFE2, 0, 0, 0, 0, 0]) if name == "get_co_core" else (1, [0] * 6)
+
+        smu = OkSmu(self.smu, env={"MEAT3_EXPERIMENTAL_SMU": "1"})
+        smu.oc_active = lambda: True                                           # manual mode on
+        ccds = [[0, 1, 2, 3], [4, 5, 6, 7]]
+        ctl = {c.id: c for c in amd_smu.smu_controls(smu, None, "cpu0", "G", ncores=8, ccds=ccds)}
+        self.assertIn("cpu0.smu.co_core5", ctl)                               # Curve Optimizer stays per core
+        self.assertIn("cpu0.smu.oc_freq_ccd1", ctl)
+        self.assertIn("cores 4-7", ctl["cpu0.smu.oc_freq_ccd1"].label)
+        self.assertNotIn("cpu0.smu.oc_freq_core5", ctl)                       # per-core frequency rows gone
+        self.assertIsNone(ctl["cpu0.smu.oc_freq_ccd1"].value)
+        smu.sent.clear()
+        ok, msg = amd_smu.smu_apply(smu, None, "cpu0", "cpu0.smu.oc_freq_ccd1", 5200, ncores=8, ccds=ccds)
+        self.assertTrue(ok, msg)
+        self.assertEqual([a for n, a in smu.sent if n == "oc_freq_core"],
+                         [[amd_smu.oc_core_mask(k) | 5200] for k in (4, 5, 6, 7)])
+        ctl = {c.id: c for c in amd_smu.smu_controls(smu, None, "cpu0", "G", ncores=8, ccds=ccds)}
+        self.assertEqual(ctl["cpu0.smu.oc_freq_ccd1"].value, 5200)
+        self.assertIsNone(ctl["cpu0.smu.oc_freq_ccd0"].value)                 # other CCD untouched
+        ok, msg = amd_smu.smu_apply(smu, None, "cpu0", "cpu0.smu.oc_freq_ccd2", 5000, ncores=8, ccds=ccds)
+        self.assertFalse(ok)
+        # backend wiring: the single-CCD fixture gets one CCD row covering every core
+        b = self.backend()
+        ids = {c.id for c in b.controls()}
+        self.assertIn("cpu0.smu.oc_freq_ccd0", ids)
+        self.assertNotIn("cpu0.smu.oc_freq_ccd1", ids)
+        self.assertNotIn("cpu0.smu.oc_freq_core0", ids)
+        self.assertEqual(b.ccd_cores(), [list(range(len(b.topo.cores)))])
+
     def test_send_success_path(self):
         class OkSmu(amd_smu.RyzenSmu):
             sent = []

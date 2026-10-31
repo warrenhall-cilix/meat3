@@ -179,6 +179,18 @@ class State:
         with self.lock:
             self.controls, self.ctl_owner = ctls, owner
 
+    def owner_for(self, cid: str):
+        """Backend for a control id: the listed owner, else the backend that owns ids with the same
+        device prefix (tools such as meat3-bin apply per-core SMU settings that have no row of their own)."""
+        b = self.ctl_owner.get(cid)
+        if b is not None or not isinstance(cid, str) or "." not in cid:
+            return b
+        pfx = cid.split(".", 1)[0] + "."
+        for other, ob in self.ctl_owner.items():
+            if other.startswith(pfx):
+                return ob
+        return None
+
     def write_osd(self):
         # Always the values, even with the OSD "off": MangoHud keeps its own shown/hidden state (its
         # toggle_hud), and a blank file would leave an empty HUD whenever the two disagree.
@@ -306,7 +318,7 @@ class Handler(socketserver.StreamRequestHandler):
             return {"ok": ok, "msg": msg}
         if cmd == "apply":
             cid = req.get("id")
-            b = st.ctl_owner.get(cid)
+            b = st.owner_for(cid)
             if b is None:
                 return {"ok": False, "msg": f"unknown control {cid}"}
             ok, msg = b.apply(cid, req.get("value"))
@@ -437,7 +449,7 @@ def apply_on_start(state) -> bool:
         f.flush()
         os.fsync(f.fileno())
     for cid, val in items.items():
-        b = state.ctl_owner.get(cid)
+        b = state.owner_for(cid)
         ok, msg = b.apply(cid, val) if b is not None else (False, "unknown control")
         print(f"meat3d: apply_on_start {cid}={val}: {'ok' if ok else 'FAILED'} {msg}")
     t = threading.Timer(config.BOOT_APPLY_GRACE_S, _clear_marker)

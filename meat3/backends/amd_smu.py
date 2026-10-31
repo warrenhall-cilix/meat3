@@ -239,7 +239,15 @@ def _read_co(smu: RyzenSmu, slot: int) -> Optional[int]:
     return v
 
 
-def smu_controls(smu: RyzenSmu, pmt, prefix: str, group: str, ncores: int) -> list[Control]:
+def _ccd_label(ccds: list[list[int]], i: int) -> str:
+    cores = ccds[i]
+    return f"CCD {i} (cores {cores[0]}-{cores[-1]})" if len(cores) > 1 else f"CCD {i} (core {cores[0]})"
+
+
+def smu_controls(smu: RyzenSmu, pmt, prefix: str, group: str, ncores: int,
+                 ccds: Optional[list[list[int]]] = None) -> list[Control]:
+    """PBO limits, per-core Curve Optimizer and manual OC. Manual frequency is per CCD: all cores of a
+    CCD share one clock, so a per-core frequency write only ever took effect CCD-wide."""
     g = f"{group}/PBO & Curve Optimizer"
     reason = _gate_reason(smu)
     avail = not reason
@@ -266,7 +274,7 @@ def smu_controls(smu: RyzenSmu, pmt, prefix: str, group: str, ncores: int) -> li
                            danger=2, available=avail,
                            hint=(reason + ". " if reason else "") + warn +
                            f" SetDldoPsmMargin, physical slot {s}; value read via GetDldoPsmMargin (RSMU 0xD5)."))
-    out += oc_controls(smu, pmt, prefix, group, ncores, reason)
+    out += oc_controls(smu, pmt, prefix, group, ncores, reason, ccds)
     return out
 
 
@@ -286,7 +294,8 @@ def oc_vid_ready(smu: RyzenSmu) -> str:
     return ""
 
 
-def oc_controls(smu: RyzenSmu, pmt, prefix: str, group: str, ncores: int, reason: str) -> list[Control]:
+def oc_controls(smu: RyzenSmu, pmt, prefix: str, group: str, ncores: int, reason: str,
+                ccds: Optional[list[list[int]]] = None) -> list[Control]:
     g = f"{group}/Manual overclocking"
     avail = not reason
     on = smu.oc_active()
@@ -306,13 +315,17 @@ def oc_controls(smu: RyzenSmu, pmt, prefix: str, group: str, ncores: int, reason
                        min=OC_FREQ_MIN, max=OC_FREQ_MAX, step=25, unit="MHz", danger=2, available=avail and on,
                        hint=(reason + ". " if reason else ("enable manual mode first. " if not on else ""))
                        + "Sets every core; per-core values below override it."))
-    slots = (pmt.slots if pmt is not None and pmt.slots else list(range(ncores)))
-    for k, sl in enumerate(slots[:ncores]):
-        out.append(Control(f"{prefix}.smu.oc_freq_core{k}", g, f"Core {k} frequency", "int",
-                           smu.oc_cache.get(f"freq_core{k}"), min=OC_FREQ_MIN, max=OC_FREQ_MAX, step=25, unit="MHz",
+    ccds = ccds or [list(range(ncores))]
+    for i, cores in enumerate(ccds):
+        vals = [smu.oc_cache.get(f"freq_core{k}") for k in cores]
+        same = vals and None not in vals and len(set(vals)) == 1
+        out.append(Control(f"{prefix}.smu.oc_freq_ccd{i}", g, f"{_ccd_label(ccds, i)} frequency", "int",
+                           vals[0] if same else None, min=OC_FREQ_MIN, max=OC_FREQ_MAX, step=25, unit="MHz",
                            danger=2, available=avail and on,
                            hint=(reason + ". " if reason else ("enable manual mode first. " if not on else ""))
-                           + f"SetOverclockFrequencyPerCore, physical slot {sl}."))
+                           + f"All {len(cores)} cores of the CCD share one clock, so this writes "
+                             "SetOverclockFrequencyPerCore to each of them; overrides the all-core value for "
+                             "that CCD."))
     return out
 
 
@@ -372,8 +385,27 @@ def oc_apply(smu: RyzenSmu, pmt, key: str, value: Any, ncores: int) -> tuple[boo
     return True, f"SMU {cmd} arg0={args[0]:#010x} OK"
 
 
-def smu_apply(smu: RyzenSmu, pmt, prefix: str, control_id: str, value: Any, ncores: int) -> tuple[bool, str]:
+def _ccd_freq_apply(smu: RyzenSmu, pmt, key: str, value: Any, ncores: int,
+                    ccds: list[list[int]]) -> tuple[bool, str]:
+    """oc_freq_ccd<i>: SetOverclockFrequencyPerCore for every core of the CCD, stopping at the first
+    failure (cores already written keep the new value)."""
+    i = key[len("oc_freq_ccd"):]
+    if not i.isdigit() or int(i) >= len(ccds):
+        return False, f"no CCD {i}"
+    done = []
+    for k in ccds[int(i)]:
+        ok, msg = oc_apply(smu, pmt, f"oc_freq_core{k}", value, ncores)
+        if not ok:
+            return False, f"core {k}: {msg}" + (f" (cores {done} already set)" if done else "")
+        done.append(k)
+    return True, f"CCD {i}: {len(done)} cores set; {msg}"
+
+
+def smu_apply(smu: RyzenSmu, pmt, prefix: str, control_id: str, value: Any, ncores: int,
+              ccds: Optional[list[list[int]]] = None) -> tuple[bool, str]:
     key = control_id[len(prefix) + len(".smu."):]
+    if key.startswith("oc_freq_ccd"):
+        return _ccd_freq_apply(smu, pmt, key, value, ncores, ccds or [list(range(ncores))])
     if key.startswith("oc_"):
         return oc_apply(smu, pmt, key, value, ncores)
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value != int(value):

@@ -1022,9 +1022,20 @@ class AmdCpuBackend(Backend):
         return out
 
     # ------------------------------------------------------------------ controls
+    def ccd_cores(self) -> list[list[int]]:
+        """Core indices per CCD (L3 domain), in L3-id order; one list when the part has a single CCD."""
+        doms = self.topo.l3_domains or {0: list(self.topo.cpus)}
+        out = []
+        for _l3id, cpus in doms.items():
+            cores = sorted({self.topo.core_of_cpu[c] for c in cpus if c in self.topo.core_of_cpu})
+            if cores:
+                out.append(cores)
+        return out or [list(range(len(self.topo.cores)))]
+
     def controls(self) -> list[Control]:
         return (self.cpufreq.controls() + self._l3_controls() + self._pipe_controls()
-                + amd_smu.smu_controls(self.smu, self.pmt, self.prefix, self.g, ncores=len(self.topo.cores)))
+                + amd_smu.smu_controls(self.smu, self.pmt, self.prefix, self.g, ncores=len(self.topo.cores),
+                                       ccds=self.ccd_cores()))
 
     def _l3_controls(self) -> list[Control]:
         r, p, g = self.resctrl.reserve, self.prefix, f"{self.g}/L3 cache"
@@ -1117,7 +1128,7 @@ class AmdCpuBackend(Backend):
             return self._pipe_apply(value)
         if control_id.startswith(f"{self.prefix}.smu."):
             return amd_smu.smu_apply(self.smu, self.pmt, self.prefix, control_id, value,
-                                     ncores=len(self.topo.cores))
+                                     ncores=len(self.topo.cores), ccds=self.ccd_cores())
         return False, f"unknown control {control_id}"
 
     def close(self) -> None:
