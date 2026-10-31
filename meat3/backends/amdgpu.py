@@ -931,6 +931,12 @@ class AmdGpuBackend(Backend):
         except Exception as e:   # never break the backend over optional telemetry
             self.vrm = None
             self._vrm_error = str(e)
+            return self.vrm
+        if not self.vrm.controllers and self.smc_fw and self.smc_fw > vrmm.SMU14_I2C_LAST_GOOD:
+            self.vrm.error = (f"SMU firmware {self.smc_fw:#x} does not expose the regulators on the SMU I2C bus "
+                              f"(AMD closed it after PMFW {vrmm.SMU14_I2C_LAST_GOOD:#x}, linux-firmware 20251111). "
+                              "VRM telemetry, offsets and the TBP/TDC gain scaling need amdgpu/smu_14_0_3.bin "
+                              f"{vrmm.SMU14_I2C_LAST_GOOD:#x} or older in /lib/firmware")
         return self.vrm
 
     def _vrm_sensors(self) -> list[Sensor]:
@@ -962,6 +968,26 @@ class AmdGpuBackend(Backend):
         out.append(Sensor(f"{P}.vrm.status", G, "VRM: " + ", ".join(
             f"0x{c.addr:02x} {c.mfr} {c.model}".strip() for c in v.controllers), float(len(v.controllers)), "", 0,
             "PMBus controllers on the GPU's SMU I2C bus; read via standard telemetry commands"))
+        g = v.rdna4_gains()
+        if g and "error" not in g:
+            src = g.get("stock_source", "")
+            hb = (f"MP2868A page-2 gain registers (fpsflow power_limit_removal layout); stock from {src}. "
+                  "The firmware's limits act on the regulator-reported values, so a scale of x1.2 means the PPT "
+                  "or TDC limit is effectively 1.2x and the driver's power/current sensors read 1/1.2 of real.")
+            tbp = g.get("tbp_scale")
+            out.append(Sensor(f"{P}.vrm.tbp_scale", G, "TBP telemetry scale (VR power gain)", tbp, "x", 3,
+                              hb + f" PG 0x{g['pg_vr1']:03x}"))
+            out.append(Sensor(f"{P}.vrm.tdc_scale", G, "TDC telemetry scale (VR current gain)", g.get("tdc_scale"),
+                              "x", 3, hb + f" CG1 0x{g['cg1_vr1']:03x}"))
+            out.append(Sensor(f"{P}.vrm.tdc_alt_scale", G, "TDC alternate scale", g.get("tdc_alt_scale"), "x", 3,
+                              hb + f" CG1 alt 0x{g['cg1_alt_vr1']:02x}"))
+            out.append(Sensor(f"{P}.vrm.idroop_raw", G, "GFX IDROOP gain (raw)", float(g["idroop_raw"] & 0xFF), "", 0,
+                              "MP2868A page-2 register 0x06 low byte (load line); scripts call it IDROOP"))
+            if tbp and abs(tbp - 1) > 0.005 and pw.get("real_w") is not None:
+                out.append(Sensor(f"{P}.vrm.real_power_scaled", G, "Real power (VR, gain-corrected)",
+                                  pw["real_w"] * tbp, "W", 0,
+                                  f"regulator input power x TBP scale {tbp:.3f}: what the card really draws while "
+                                  "the firmware and driver see 1/scale of it"))
         for (addr, page), r in sorted(data.items()):
             key, label = vrmm.RAILS[(addr, page)]
             h = f"PMBus 0x{addr:02x} page {page}"

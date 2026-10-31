@@ -11,7 +11,7 @@ On a real ASUS RX 9070 XT (VBIOS 115-G295BP00-100), Manjaro, kernel 7.2:
 |---|---|
 | Standard monitoring and firmware power table limits | Works |
 | Hidden firmware metrics (`meat3_smu`) | Works |
-| VRM telemetry and VRM controls over PMBus | **Not usable on that card.** The GPU's "AMDGPU SMU" I2C buses answered at no address during a full read scan, so on RDNA4 the voltage regulators appear to be reachable only by the GPU firmware. On such cards meat³ shows "VRM controllers: not reachable" and offers no VRM controls |
+| VRM telemetry and VRM controls over PMBus | **Depends on the SMU firmware version.** AMD's PMFW stopped exposing the regulators on the "AMDGPU SMU" I2C buses after `smu_14_0_3.bin` 0x684a00 (linux-firmware 2025-06-20, release 20251111). With 0x684b00 (2025-11-19) or newer the buses answer at no address and meat³ shows "VRM controllers: not reachable" with the firmware version. With the older firmware the two MP2868A controllers at 0x22 and 0x24 answer, and meat³ reads their page-2 telemetry gains (the registers fpsflow's `power_limit_removal` scripts scale to lift TBP/TDC) and corrects its power and current readings by the active scale |
 | `meat3-gputune` | Uses the driver's own voltage offset, so it doesn't need the VRMs |
 | `meat3-skutable` and the patched amdgpu | Not yet tested on hardware |
 

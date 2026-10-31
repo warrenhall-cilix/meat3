@@ -51,6 +51,37 @@ PAGE, VOUT_MODE, VOUT_CAL_OFFSET, VOUT_DROOP, IOUT_CAL_GAIN = 0x00, 0x20, 0x23, 
 READ_VIN, READ_IIN, READ_VOUT, READ_IOUT, READ_TEMP1, READ_POUT = 0x88, 0x89, 0x8B, 0x8C, 0x8D, 0x96
 PMBUS_REVISION, MFR_ID, MFR_MODEL = 0x98, 0x99, 0x9A
 MPS_MFR_VR_CONFIG2, MPS_VOUT_LINEAR = 0x5E, 1 << 11
+# RDNA4 MP2868A telemetry-gain registers on PMBus page 2 (register map published by fpsflow's GPL-3
+# power_limit_removal scripts, which the community uses on RX 9070 cards). The firmware's PPT and TDC
+# limits act on the current/power the regulator reports, so these gains are the "shunt mod in software":
+#   PG   0x0f bits 10:0  power (TBP) telemetry gain      TBP scale  = stock_pg  / pg
+#   CG1  0x08 bits 10:0  current (TDC) telemetry gain    TDC scale  = stock_cg1 / cg1
+#   CG1a 0x0c bits 10:4  alternate TDC gain              TDCa scale = stock_cg1a / cg1a
+#   DRP  0x06            IDROOP (load-line) gain, low 8 bits
+# The scripts keep a stock backup in page-1 registers 0x4d (16 bits) and 0x4b (bits 15:11):
+#   block(vr) = (reg4d << 5) | (reg4b >> 11 & 0x1f)   (21 bits per controller)
+#   packed    = (block(0x22) << 21) | (block(0x24) & 0x1fffff)
+#   fields LSB first: cg1a (7), pg of 0x24 (11), cg1 of 0x22 (11), pg of 0x22 (11), valid flag (1)
+# meat3 only READS these (to show and correct the scaling); the writes stay with the scripts.
+MPS_PAGE2 = 2
+MPS_PG, MPS_CG1, MPS_CG1_ALT, MPS_IDROOP_GAIN = 0x0F, 0x08, 0x0C, 0x06
+MPS_BACKUP1, MPS_BACKUP2 = 0x4B, 0x4D
+MP2868A_MODEL_BYTE = 0x68
+# AMD's SMU firmware stopped exposing the VR bus on its I2C adapters after PMFW 0x684a00
+# (linux-firmware 2025-06-20 / release 20251111); 0x684b00 (2025-11-19) and later answer at no address.
+SMU14_I2C_LAST_GOOD = 0x684A00
+
+
+def decode_rdna4_backup(block_vr1: int, block_vr2: int) -> Optional[dict]:
+    """Stock gains from the two 21-bit backup blocks, or None when the valid flag is clear."""
+    data = ((block_vr1 & 0x1FFFFF) << 21) | (block_vr2 & 0x1FFFFF)
+    cg1a = data & 0x7F; data >>= 7
+    pg2 = data & 0x7FF; data >>= 11
+    cg1 = data & 0x7FF; data >>= 11
+    pg1 = data & 0x7FF; data >>= 11
+    if not data & 1:
+        return None
+    return {"pg_vr1": pg1, "cg1_vr1": cg1, "pg_vr2": pg2, "cg1_alt_vr1": cg1a}
 
 RAILS = {  # (address, page) -> (key, label)
     (0x22, 0): ("vgfx", "VDD_GFX (GPU core)"),
@@ -189,6 +220,7 @@ class Controller:
         self.profile = profile
         self.pages = sorted(p for a, p in RAILS if a == addr)
         self.mode: dict[int, int] = {}
+        self.mp2868a = False          # RDNA4 controller: page-2 gain registers are meaningful
 
 
 class VrmAccess:
@@ -249,7 +281,15 @@ class VrmAccess:
                     pass
                 prof = self.profile_override if self.profile_override in ("mps", "generic") else \
                     detect_profile(mfr, model)
-                self.controllers.append(Controller(bus_no, addr, mfr, model, rev, prof))
+                c = Controller(bus_no, addr, mfr, model, rev, prof)
+                try:                      # MP2868A reports 0x68 in a byte of MFR_MODEL read as a word
+                    w = bus.read_word(addr, MFR_MODEL)
+                    c.mp2868a = addr in (0x22, 0x24) and MP2868A_MODEL_BYTE in (w & 0xFF, w >> 8 & 0xFF)
+                except OSError:
+                    pass
+                if c.mp2868a and prof == "generic":
+                    c.profile = "mps"
+                self.controllers.append(c)
         if not self.controllers:
             # Real ASUS RX 9070 XT (kernel 7.2): a full read scan of both "AMDGPU SMU" buses found no
             # device at any address, so on RDNA4 the regulators look reachable only by the GPU firmware.
@@ -280,6 +320,57 @@ class VrmAccess:
             pass
 
     # -------------------------------------------------------------- telemetry
+    def rdna4_gains(self) -> Optional[dict]:
+        """RDNA4 (MP2868A) telemetry gains: current page-2 values, the scripts' stock backup when present,
+        and the resulting multipliers (stock / current). Read-only; PAGE is restored to 0."""
+        c1 = next((c for c in self.controllers if c.mp2868a and c.addr == 0x22), None)
+        c2 = next((c for c in self.controllers if c.mp2868a and c.addr == 0x24), None)
+        if c1 is None:
+            return None
+        out: dict = {}
+        try:
+            bus = self._bus(c1.bus_no)
+            bus.write_byte(c1.addr, PAGE, MPS_PAGE2)
+            out["pg_vr1"] = bus.read_word(c1.addr, MPS_PG) & 0x7FF
+            out["cg1_vr1"] = bus.read_word(c1.addr, MPS_CG1) & 0x7FF
+            out["cg1_alt_vr1"] = bus.read_word(c1.addr, MPS_CG1_ALT) >> 4 & 0x7F
+            out["idroop_raw"] = bus.read_word(c1.addr, MPS_IDROOP_GAIN)
+            bus.write_byte(c1.addr, PAGE, 1)
+            b1 = (bus.read_word(c1.addr, MPS_BACKUP2) << 5) | (bus.read_word(c1.addr, MPS_BACKUP1) >> 11 & 0x1F)
+            bus.write_byte(c1.addr, PAGE, 0)
+            b2 = 0
+            if c2 is not None:
+                bus2 = self._bus(c2.bus_no)
+                bus2.write_byte(c2.addr, PAGE, MPS_PAGE2)
+                out["pg_vr2"] = bus2.read_word(c2.addr, MPS_PG) & 0x7FF
+                bus2.write_byte(c2.addr, PAGE, 1)
+                b2 = (bus2.read_word(c2.addr, MPS_BACKUP2) << 5) | (bus2.read_word(c2.addr, MPS_BACKUP1) >> 11 & 0x1F)
+                bus2.write_byte(c2.addr, PAGE, 0)
+        except OSError as e:
+            for c in (c1, c2):
+                if c is not None:
+                    try:
+                        self._bus(c.bus_no).write_byte(c.addr, PAGE, 0)
+                    except OSError:
+                        pass
+            out["error"] = e.strerror or str(e)
+            return out
+        stock = decode_rdna4_backup(b1, b2)
+        out["stock"] = stock
+        # Without a scripts backup, the first values meat3 sees are taken as stock (saved per card).
+        if stock is None:
+            stock = {k: self._factory(c1, MPS_PAGE2, "/" + k, out[k]) for k in ("pg_vr1", "cg1_vr1", "cg1_alt_vr1")}
+            if "pg_vr2" in out:
+                stock["pg_vr2"] = self._factory(c2, MPS_PAGE2, "/pg_vr2", out["pg_vr2"])
+            out["stock_source"] = "meat3 first-seen"
+        else:
+            out["stock_source"] = "scripts backup"
+        div = lambda s, cur: (s / cur) if s and cur else None
+        out["tbp_scale"] = div(stock.get("pg_vr1"), out["pg_vr1"])
+        out["tdc_scale"] = div(stock.get("cg1_vr1"), out["cg1_vr1"])
+        out["tdc_alt_scale"] = div(stock.get("cg1_alt_vr1"), out["cg1_alt_vr1"])
+        return out
+
     def read_all(self, min_interval: float = 2.0) -> dict:
         """{(addr, page): {...}} cached for min_interval seconds (each read is an SMU I2C transfer)."""
         now = time.monotonic()

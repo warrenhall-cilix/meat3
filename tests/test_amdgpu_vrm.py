@@ -296,6 +296,53 @@ class TestVrm(Base):
         self.assertEqual(v.controllers, [])
         self.assertIn("0x22/0x24/0x26", v.error)
 
+    def test_backend_names_the_firmware_when_bus_is_dead(self):
+        """Fixture SMU firmware 0x685300 is newer than the last version exposing the VR bus."""
+        self.ctls.clear()
+        be = A.AmdGpuBackend.detect(self.root)[0]
+        be.vrm_opener = self.opener
+        ss = {s.id: s for s in be.sensors()}
+        self.assertIn("0x685300", ss["amdgpu0.vrm.status"].hint)
+        self.assertIn("0x684a00", ss["amdgpu0.vrm.status"].hint)
+
+    def test_rdna4_gain_registers(self):
+        """MP2868A pair: page-2 gains and the scripts' stock backup give the TBP/TDC scales."""
+        stock = {"pg_vr1": 0x400, "cg1_vr1": 0x300, "pg_vr2": 0x380, "cg1_alt_vr1": 0x40}
+        packed = (1 << 40) | (stock["pg_vr1"] << 29) | (stock["cg1_vr1"] << 18) | (stock["pg_vr2"] << 7) | stock["cg1_alt_vr1"]
+        b1, b2 = packed >> 21 & 0x1FFFFF, packed & 0x1FFFFF
+        self.assertEqual(V.decode_rdna4_backup(b1, b2), stock)
+        self.assertIsNone(V.decode_rdna4_backup(b1 & ~(1 << 19), b2))          # valid flag clear
+
+        def mp2868a(pages, pg, cg1, cg1a, block):
+            c = FakeMps(pages, vout=1.0, iout=100)
+            c.regs[0][V.MFR_MODEL] = 0x6868                                   # fpsflow's RDNA4 check byte
+            c.regs.setdefault(1, {})                                          # backup lives on page 1
+            c.real.setdefault(1, (1.0, 100))
+            c.regs[1][V.MPS_BACKUP2] = block >> 5 & 0xFFFF
+            c.regs[1][V.MPS_BACKUP1] = (block & 0x1F) << 11
+            c.regs[2] = {V.MPS_PG: 0x8000 | pg, V.MPS_CG1: cg1, V.MPS_CG1_ALT: cg1a << 4 | 0x3, V.MPS_IDROOP_GAIN: 0x1234}
+            c.real[2] = (1.0, 100)
+            return c
+        # current PG of vr1 = stock / 1.25, CG1 = stock / 1.2
+        self.ctls = {0x22: mp2868a([0], 0x400 * 4 // 5, 0x300 * 5 // 6, 0x40, b1),
+                     0x24: mp2868a([0, 1], 0x380, 0, 0, b2)}
+        v = self.vrm()
+        self.assertTrue(all(c.mp2868a for c in v.controllers))
+        g = v.rdna4_gains()
+        self.assertEqual(g["stock_source"], "scripts backup")
+        self.assertAlmostEqual(g["tbp_scale"], 1.25, places=3)
+        self.assertAlmostEqual(g["tdc_scale"], 1.2, places=3)
+        self.assertAlmostEqual(g["tdc_alt_scale"], 1.0, places=3)
+        self.assertEqual(g["idroop_raw"], 0x1234)
+        self.assertEqual(self.ctls[0x22].page, 0)                               # PAGE restored
+        self.assertEqual(self.ctls[0x22].writes, [])                            # nothing but PAGE written
+        be = A.AmdGpuBackend.detect(self.root)[0]
+        be.vrm_opener = self.opener
+        ss = {s.id: s for s in be.sensors()}
+        self.assertAlmostEqual(ss["amdgpu0.vrm.tbp_scale"].value, 1.25, places=3)
+        self.assertAlmostEqual(ss["amdgpu0.vrm.tdc_scale"].value, 1.2, places=3)
+        self.assertIn("amdgpu0.vrm.real_power_scaled", ss)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
