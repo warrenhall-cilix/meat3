@@ -277,3 +277,13 @@ How it works:
 5. Leaves manual mode at the end, or if anything goes wrong.
 
 `--compare` reports each CCD's mean, best and worst clock at that voltage.
+
+## Guard trips
+
+When a safety guard fires (see `guards` in `/etc/meat3/config.json`), the daemon applies the guard's
+value, remembers what the control was set to before, and raises an alert. The GUI shows a red
+"⚠ Guard tripped" button in the status bar and flashes the trigger; the TUI shows it in the header.
+Open it to see the trigger and the actions, then either **Restore previous** (puts the pre-trip values
+back; the condition that tripped it may still be there) or **Dismiss** (keeps the guard's value).
+TUI: `G` restores the latest trip, `D` dismisses it. The guard fires once per excursion, so the alert
+is the only reminder that the limit is still down.

@@ -326,6 +326,7 @@ class Tui:
         self.filter = ""
         self.last_poll = 0.0
         self.upd: dict = {}
+        self.alerts: list = []
         self.upd_t = 0.0
         self._colors()
 
@@ -417,6 +418,7 @@ class Tui:
             self.hist.setdefault(s["id"], collections.deque(maxlen=HISTORY)).append(
                 v if isinstance(v, (int, float)) and not isinstance(v, bool) else None)
         self.controls = snap.get("controls", [])
+        self.alerts = snap.get("alerts") or []
         self.poll_ms = snap.get("poll_ms")
         self.osd = osd.get("enabled")
         if time.time() - self.upd_t > (3 if self.upd.get("running") or self.upd.get("checking") else 30):
@@ -492,6 +494,8 @@ class Tui:
         u = self.upd
         upd = ("updating… · " if u.get("running") else
                f"⬆ {u['behind']} updates (u) · " if u.get("behind") else "")
+        if self.alerts:
+            upd = f"⚠ GUARD: {self.alerts[-1].get('guard', '')} (G restore, D dismiss) · " + upd
         info = f"{upd}{self.hello.get('host', '?')} · poll {self.poll_ms or 0:.0f} ms · OSD {'on' if self.osd else 'off'} · " \
                f"{time.strftime('%H:%M:%S')} "
         self.put(0, max(x, w - len(info)), info, self.cp["head"])
@@ -967,6 +971,14 @@ class Tui:
                 self.flash(str(e))
         elif ch == "u":
             self.update_key()
+        elif ch in ("G", "D") and self.alerts:
+            e = self.alerts[-1]
+            try:
+                r = self.c.call({"cmd": "guard_restore" if ch == "G" else "guard_ack", "id": e["id"]})
+                self.flash(("restored: " + str(r.get("msg", ""))) if ch == "G" else
+                           (f"dismissed: {e.get('guard', '')}" if r.get("ok") else str(r.get("msg", ""))))
+            except (OSError, ValueError) as ex:
+                self.flash(str(ex))
         elif ch == "h":
             self.hotkey_key()
         elif ch in ("a", "g") and v == 1:

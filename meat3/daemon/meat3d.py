@@ -150,6 +150,7 @@ class State:
             if n == int(g.get("count", 1)):
                 worst = max(hot, key=lambda s: s["value"])
                 msgs = []
+                before: dict = {}
                 ctl_by_id = {c["id"]: c for c in self.controls}
                 for cid, b in list(self.ctl_owner.items()):
                     if fnmatch.fnmatch(cid, g["control"]):
@@ -158,15 +159,49 @@ class State:
                             val = ctl_by_id.get(cid, {}).get(val)
                         if val is None:
                             msgs.append(f"{cid}: no {g['value']} known"); continue
+                        prev = ctl_by_id.get(cid, {}).get("value")
                         ok, msg = b.apply(cid, val)
                         msgs.append(f"{cid}={val} -> {'ok' if ok else 'FAILED: ' + msg}")
-                entry = {"t": time.time(), "guard": g["name"],
+                        if ok and prev is not None and prev != val:
+                            before[cid] = prev
+                self.guard_seq = getattr(self, "guard_seq", 0) + 1
+                entry = {"id": self.guard_seq, "t": time.time(), "guard": g["name"],
                          "trigger": f"{worst['label']} = {worst['value']} {worst.get('unit', '')} > {g['above']}",
-                         "actions": msgs}
+                         "actions": msgs, "before": before, "acked": False}
                 self.guard_log = (self.guard_log + [entry])[-50:]
                 print(f"meat3d: GUARD TRIP {entry}")
                 if msgs:
                     self.refresh_controls()
+
+    def alerts(self) -> list:
+        """Guard trips nobody has acknowledged yet (shown in the GUI/TUI until dismissed or restored)."""
+        return [e for e in getattr(self, "guard_log", []) if not e.get("acked")]
+
+    def guard_ack(self, gid) -> bool:
+        found = False
+        for e in getattr(self, "guard_log", []):
+            if gid in ("all", e["id"]):
+                e["acked"] = True
+                found = True
+        return found
+
+    def guard_restore(self, gid) -> tuple[bool, str]:
+        """Put the controls a trip changed back to the values they had before it, and acknowledge it."""
+        e = next((x for x in getattr(self, "guard_log", []) if x["id"] == gid), None)
+        if e is None:
+            return False, f"no guard trip {gid}"
+        msgs = []
+        for cid, val in (e.get("before") or {}).items():
+            b = self.owner_for(cid)
+            if b is None:
+                msgs.append(f"{cid}: gone"); continue
+            ok, msg = b.apply(cid, val)
+            msgs.append(f"{cid}={val} -> {'ok' if ok else 'FAILED: ' + msg}")
+        e["acked"] = True
+        e["restored"] = True
+        print(f"meat3d: guard trip {gid} restored: {'; '.join(msgs) or 'nothing to restore'}")
+        self.refresh_controls()
+        return (True, "; ".join(msgs)) if msgs else (False, "that trip changed nothing that can be restored")
 
     def refresh_controls(self):
         ctls, owner = [], {}
@@ -292,10 +327,19 @@ class Handler(socketserver.StreamRequestHandler):
         if cmd == "snapshot":
             with st.lock:
                 return {"ok": True, "t": st.t, "poll_ms": round(st.poll_ms, 1),
-                        "sensors": st.sensors, "controls": st.controls}
+                        "sensors": st.sensors, "controls": st.controls, "alerts": st.alerts()}
         if cmd == "guards":
             return {"ok": True, "guards": config.get().get("guards", []),
                     "log": list(getattr(st, "guard_log", []))}
+        if cmd == "guard_ack":
+            if not can_write:
+                return {"ok": False, "msg": "not allowed (join the meat3 group)"}
+            return {"ok": st.guard_ack(req.get("id", "all"))}
+        if cmd == "guard_restore":
+            if not can_write:
+                return {"ok": False, "msg": "not allowed (join the meat3 group)"}
+            ok, msg = st.guard_restore(req.get("id"))
+            return {"ok": ok, "msg": msg}
         if cmd == "osd_get":
             with st.lock:
                 return {"ok": True, "enabled": bool(st.osd.get("enabled")), "items": list(st.osd.get("items", [])),

@@ -59,7 +59,7 @@ def test_gui_smoke():
 
 
 def _run(tmp: Path, sock: str, osd_file: str, mock):
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QPushButton, QApplication
 
     from meat3.gui.app import MainWindow
     from meat3.gui.common import apply_theme, theme
@@ -504,6 +504,37 @@ def _exercise(app, w, tmp, sock, osd_file, mock):
     _wait(app, lambda: "r" in got, 5, "osd_set hotkey")
     assert got["r"]["ok"], got
     _wait(app, lambda: "Left Alt + O" in w.osd.hotkey_lbl.text(), 5, "hotkey label follows daemon")
+
+    # --- guard trip: status-bar warning, dialog with restore and dismiss
+    assert not w.guard_btn.isVisible()
+    got = {}
+    w.link.request({"cmd": "mock_trip"}, lambda r: got.setdefault("r", r))
+    _wait(app, lambda: "r" in got and got["r"]["ok"], 5, "mock trip")
+    _wait(app, lambda: w.guard_btn.isVisible() and "pin overcurrent" in w.guard_btn.text(), 8, "guard button")
+    _wait(app, lambda: ctrl("nv0.oc.power_limit")["value"] == 300, 5, "guard lowered the limit")
+    w.show_guards()
+    dlg = w._guard_dlg
+    _wait(app, lambda: dlg.isVisible() and len(dlg.entries) == 1, 5, "guard dialog")
+    from PySide6.QtWidgets import QPushButton
+    restore = [b for b in dlg.body.findChildren(QPushButton) if b.text() == "Restore previous"]
+    assert len(restore) == 1
+    restore[0].click()
+    _wait(app, lambda: ctrl("nv0.oc.power_limit")["value"] == 360, 8, "restore put the limit back")
+    _wait(app, lambda: not w.guard_btn.isVisible(), 8, "guard button cleared after restore")
+    _wait(app, lambda: "ok" in dlg.result_lbl.text(), 5, "restore result shown")
+    dlg.close()
+    w.link.request({"cmd": "mock_trip"}, lambda r: None)
+    _wait(app, lambda: w.guard_btn.isVisible(), 8, "second trip")
+    _wait(app, lambda: "pin overcurrent" in w.statusBar().currentMessage(), 8, "status-bar flash for a new trip")
+    w.show_guards()
+    dlg = w._guard_dlg
+    _wait(app, lambda: dlg.isVisible() and len(dlg.entries) == 1, 5, "guard dialog again")
+    dlg.btn_all.click()
+    _wait(app, lambda: not w.guard_btn.isVisible(), 8, "dismiss all")
+    dlg.close()
+    assert ctrl("nv0.oc.power_limit")["value"] == 300                  # dismiss keeps the guard's value
+    w.link.request({"cmd": "apply", "id": "nv0.oc.power_limit", "value": 360}, lambda r: None)
+    _wait(app, lambda: ctrl("nv0.oc.power_limit")["value"] == 360, 5, "limit back for the rest of the test")
 
     # --- updates: status-bar button and dialog (mockd reports 2 new commits)
     w.started_version = "0ld0ld0"                      # this window predates the installed "mock" version

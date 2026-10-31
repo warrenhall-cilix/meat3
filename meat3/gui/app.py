@@ -111,6 +111,14 @@ class MainWindow(QMainWindow):
         self.conn_lbl = QLabel("connecting…")
         self.poll_lbl = QLabel("")
         self.log_lbl = QLabel("")
+        self.guard_btn = QPushButton("")
+        self.guard_btn.setFlat(True)
+        self.guard_btn.setObjectName("guardAlert")
+        self.guard_btn.setStyleSheet("#guardAlert { color: #ff5c5c; font-weight: bold; }")
+        self.guard_btn.setToolTip("A safety guard changed a setting; click for details, restore or dismiss")
+        self.guard_btn.hide()
+        self.guard_btn.clicked.connect(self.show_guards)
+        sb.addPermanentWidget(self.guard_btn)
         self.upd_btn = QPushButton("")
         self.upd_btn.setFlat(True)
         self.upd_btn.hide()
@@ -135,6 +143,7 @@ class MainWindow(QMainWindow):
         self.osd.style_changed.connect(self._style_changed)
         self.link.connected.connect(self._on_connected)
         self.link.disconnected.connect(self._on_disconnected)
+        self._alerts = []
         self.link.snapshot.connect(self._on_snapshot)
         self.link.osd_state.connect(self._on_osd_state)
         self.store.logging_changed.connect(self._on_logging)
@@ -238,6 +247,31 @@ class MainWindow(QMainWindow):
         else:
             super().paintEvent(e)
 
+    def show_guards(self):
+        from meat3.gui.guards import GuardDialog
+        dlg = getattr(self, "_guard_dlg", None)
+        if dlg is None or not dlg.isVisible():
+            self._guard_dlg = dlg = GuardDialog(self.link, self)
+        dlg.load(self._alerts)
+        dlg.show()
+        dlg.raise_()
+
+    def _on_alerts(self, alerts: list):
+        seen = getattr(self, "_alert_ids", set())
+        new = [e for e in alerts if e.get("id") not in seen]
+        self._alert_ids = seen | {e.get("id") for e in alerts}
+        self._alerts = alerts
+        if alerts:
+            e = alerts[-1]
+            self.guard_btn.setText(f"⚠ Guard tripped: {e.get('guard', '')} ({len(alerts)})")
+        self.guard_btn.setVisible(bool(alerts))
+        dlg = getattr(self, "_guard_dlg", None)
+        if dlg is not None and dlg.isVisible():
+            dlg.load(alerts)
+        if new and seen:                      # not the backlog at connect time: say it out loud
+            from meat3.gui.guards import alert_text
+            self.statusBar().showMessage("⚠ " + alert_text(new[-1]), 15000)
+
     def show_updates(self):
         dlg = getattr(self, "_upd_dlg", None)
         if dlg is None or not dlg.isVisible():
@@ -308,6 +342,7 @@ class MainWindow(QMainWindow):
                         if bname and bname.lower() in node.name.lower():
                             self.sensors.model.device_kinds[node.name] = kind
         self.store.ingest(snap)
+        self._on_alerts(snap.get("alerts") or [])
         self.poll_lbl.setText(f"{len(self.store.sensors)} sensors · {time.strftime('%H:%M:%S', time.localtime(self.store.t))}")
 
     def _on_osd_state(self, osd: dict):

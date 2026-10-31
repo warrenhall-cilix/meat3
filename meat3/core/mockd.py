@@ -743,6 +743,8 @@ class MockDaemon:
         self.lock = threading.Lock()
         self.stats = Stats()
         self.sensors: list[dict] = []
+        self.guard_log: list[dict] = []
+        self.guard_seq = 0
         self.t = time.time()
         self.osd_enabled = True
         self.osd_items = ["nv0.clk.gpc", "nv0.temp.gpu", "nv0.pwr.real", "nv0.volt.nvvdd",
@@ -811,7 +813,34 @@ class MockDaemon:
             ctrls = []
             for b in self.backends:
                 ctrls += [c.to_dict() for c in b.controls()]
-            return {"ok": True, "t": t, "sensors": sens, "controls": ctrls}
+            return {"ok": True, "t": t, "sensors": sens, "controls": ctrls,
+                    "alerts": [e for e in self.guard_log if not e.get("acked")]}
+        if cmd == "mock_trip":                    # test hook: pretend the pin-current guard fired
+            cid, val = "nv0.oc.power_limit", 300
+            prev = next(c.value for b in self.backends for c in b.controls() if c.id == cid)
+            ok, msg = self.handle({"cmd": "apply", "id": cid, "value": val}).values()
+            self.guard_seq += 1
+            self.guard_log.append({"id": self.guard_seq, "t": time.time(), "guard": "12V-2x6 pin overcurrent",
+                                   "trigger": "Pin 5 current = 8.58 A > 8.5", "actions": [f"{cid}={val} -> ok"],
+                                   "before": {cid: prev}, "acked": False})
+            return {"ok": True, "id": self.guard_seq}
+        if cmd == "guard_ack":
+            for e in self.guard_log:
+                if req.get("id", "all") in ("all", e["id"]):
+                    e["acked"] = True
+            return {"ok": True}
+        if cmd == "guard_restore":
+            e = next((x for x in self.guard_log if x["id"] == req.get("id")), None)
+            if e is None:
+                return {"ok": False, "msg": "no such trip"}
+            msgs = []
+            for cid, val in e["before"].items():
+                r = self.handle({"cmd": "apply", "id": cid, "value": val})
+                msgs.append(f"{cid}={val} -> {'ok' if r.get('ok') else 'FAILED'}")
+            e["acked"] = e["restored"] = True
+            return {"ok": True, "msg": "; ".join(msgs)}
+        if cmd == "guards":
+            return {"ok": True, "guards": [], "log": list(self.guard_log)}
         if cmd == "apply":
             cid = req.get("id")
             for b in self.backends:
