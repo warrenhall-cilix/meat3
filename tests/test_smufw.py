@@ -88,13 +88,45 @@ class TestSmufw(unittest.TestCase):
             def __enter__(self): return self
             def __exit__(self, *a): pass
             def read(self): return b"not the firmware"
-        smufw.urllib.request.urlopen = lambda url, timeout=60: R()
+        smufw.urllib.request.urlopen = lambda req, timeout=60: R()
         try:
             with self.assertRaises(RuntimeError):
                 smufw.fetch("smu_14_0_3.bin", self.cache)
         finally:
             smufw.urllib.request.urlopen = old
         self.assertEqual(open(self.inst, "rb").read(), DIST)
+
+    def test_local_file_and_user_agent(self):
+        seen = []
+
+        class R:
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+            def read(self): return GOOD
+        old = smufw.urllib.request.urlopen
+
+        def fake(req, timeout=60):
+            seen.append(req.get_header("User-agent"))
+            return R()
+        smufw.urllib.request.urlopen = fake
+        try:
+            os.unlink(os.path.join(self.cache, f"smu_14_0_3.bin.{smufw.COMMIT}"))
+            self.assertTrue(smufw.fetch("smu_14_0_3.bin", self.cache).endswith(smufw.COMMIT))
+            self.assertEqual(seen, [smufw.USER_AGENT])
+        finally:
+            smufw.urllib.request.urlopen = old
+        # --file: a plain local copy, hash-checked
+        os.unlink(os.path.join(self.cache, f"smu_14_0_3.bin.{smufw.COMMIT}"))
+        bad = os.path.join(self.tmp, "bad.bin")
+        with open(bad, "wb") as f:
+            f.write(b"nope")
+        with self.assertRaises(RuntimeError):
+            smufw.fetch("smu_14_0_3.bin", self.cache, local=bad)
+        good = os.path.join(self.tmp, "good.bin")
+        with open(good, "wb") as f:
+            f.write(GOOD)
+        self.assertEqual(smufw.pin(self.root, self.cache, no_initramfs=True, local=good), 0)
+        self.assertEqual(open(self.inst, "rb").read(), GOOD)
 
     def test_restore_without_backup(self):
         self.assertEqual(smufw.restore(self.root, self.cache, no_initramfs=True), 1)

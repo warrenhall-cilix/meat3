@@ -25,11 +25,16 @@ import os
 import shutil
 import subprocess
 import sys
+import urllib.error
 import urllib.request
 from typing import Optional
 
 COMMIT = "72a8d254"
-SOURCE = "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/amdgpu/{name}?id=" + COMMIT
+COMMIT_FULL = "72a8d25438c080170c44488f61902e20328c6c23"
+# kernel.org refuses Python's default user agent (403), so identify as meat3; the GitLab mirror is the fallback
+SOURCES = ["https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/amdgpu/{name}?id=" + COMMIT,
+           "https://gitlab.com/kernel-firmware/linux-firmware/-/raw/" + COMMIT_FULL + "/amdgpu/{name}"]
+USER_AGENT = "meat3-smufw/1 (+https://github.com/warrenhall-cilix/meat3)"
 # sha256 of the plain (uncompressed) blobs at that commit
 KNOWN_GOOD = {
     "smu_14_0_3.bin": "e7ba91177127f5ed3669165d44195230901834d3c6f0b46dbf2c8ee9ec521b5a",
@@ -107,18 +112,37 @@ def fw_name(mp1: tuple) -> Optional[str]:
     return None
 
 
-def fetch(name: str, cache: str = CACHE) -> str:
-    """Download the known-good blob into the cache (hash-checked); returns its path."""
+def fetch(name: str, cache: str = CACHE, local: Optional[str] = None) -> str:
+    """Get the known-good blob into the cache (hash-checked) from a local file or the sources; returns its path."""
     os.makedirs(cache, exist_ok=True)
     dst = os.path.join(cache, f"{name}.{COMMIT}")
     if os.path.exists(dst) and sha256(open(dst, "rb").read()) == KNOWN_GOOD[name]:
         return dst
-    url = SOURCE.format(name=name)
-    print(f"downloading {url}")
-    with urllib.request.urlopen(url, timeout=60) as r:
-        data = r.read()
-    if sha256(data) != KNOWN_GOOD[name]:
-        raise RuntimeError(f"downloaded {name} does not match the known-good sha256; not installing it")
+    data = None
+    if local:
+        data = decompress(local)
+        if sha256(data) != KNOWN_GOOD[name]:
+            raise RuntimeError(f"{local} is not the known-good {name} (sha256 {sha256(data)[:12]}…)")
+    else:
+        errors = []
+        for url in SOURCES:
+            u = url.format(name=name)
+            print(f"downloading {u}")
+            try:
+                req = urllib.request.Request(u, headers={"User-Agent": USER_AGENT})
+                with urllib.request.urlopen(req, timeout=60) as r:
+                    cand = r.read()
+            except (OSError, urllib.error.URLError) as e:
+                errors.append(f"{u}: {e}")
+                continue
+            if sha256(cand) != KNOWN_GOOD[name]:
+                errors.append(f"{u}: sha256 mismatch")
+                continue
+            data = cand
+            break
+        if data is None:
+            raise RuntimeError("could not fetch a verified copy:\n  " + "\n  ".join(errors) +
+                               "\nGet the file another way and pass it with --file")
     with open(dst + ".tmp", "wb") as f:
         f.write(data)
     os.replace(dst + ".tmp", dst)
@@ -186,7 +210,8 @@ def status(root: str = "/", cache: str = CACHE) -> int:
     return rc
 
 
-def pin(root: str = "/", cache: str = CACHE, no_initramfs: bool = False, dry: bool = False) -> int:
+def pin(root: str = "/", cache: str = CACHE, no_initramfs: bool = False, dry: bool = False,
+        local: Optional[str] = None) -> int:
     devs = [d for d in running_pmfw(root) if fw_name(d[2])]
     if not devs:
         print("no RDNA4 (SMU 14.0.2 / 14.0.3) GPU found")
@@ -196,7 +221,7 @@ def pin(root: str = "/", cache: str = CACHE, no_initramfs: bool = False, dry: bo
     if not inst:
         print(f"{name} is not installed under {', '.join(FW_DIRS)}; install your distribution's amdgpu firmware first")
         return 2
-    src = fetch(name, cache)
+    src = fetch(name, cache, local)
     data = open(src, "rb").read()
     cur = decompress(inst)
     if sha256(cur) == KNOWN_GOOD[name]:
@@ -277,6 +302,8 @@ def main(argv=None) -> int:
     g.add_argument("--restore", action="store_true", help="put the backed-up distribution file back")
     ap.add_argument("--no-initramfs", action="store_true", help="do not regenerate the initramfs")
     ap.add_argument("--dry-run", action="store_true", help="say what would be done")
+    ap.add_argument("--file", help="use this local copy of the firmware (plain, .zst or .xz) instead of downloading; "
+                                   "still has to match the known-good sha256")
     ap.add_argument("--root", default="/", help=argparse.SUPPRESS)
     ap.add_argument("--cache", default=CACHE, help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
@@ -285,7 +312,7 @@ def main(argv=None) -> int:
         return 2
     try:
         if a.pin:
-            return pin(a.root, a.cache, a.no_initramfs, a.dry_run)
+            return pin(a.root, a.cache, a.no_initramfs, a.dry_run, a.file)
         if a.restore:
             return restore(a.root, a.cache, a.no_initramfs, a.dry_run)
         return status(a.root, a.cache)
