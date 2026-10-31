@@ -31,6 +31,7 @@ from typing import Any, Optional
 
 from meat3.core.fmt import osd_line
 from meat3.core.model import Backend, Control, Sensor
+from meat3.backends.vf_measured import VfMeasured
 
 PROTOCOL_VERSION = "0.1"
 DEFAULT_HOTKEY = "KEY_RIGHTCTRL+KEY_F12"
@@ -398,6 +399,10 @@ class MockRX9070XT(MockBackend):
         super().__init__(sim, 9070)
         self.edge = Smooth(38.0, 0.05)
         self.ppt = Smooth(24.0, 0.4)
+        self.vfm = VfMeasured()
+        # a pre-filled RDNA4-like trace so the GUI has something to show from the first poll
+        self.vfm.load([{"mv": mv, "mhz": 1900 + (mv - 700) * 3.1 - max(0, mv - 1000) * 1.2, "n": 4}
+                       for mv in range(700, 1100, 10)])
         for c in self.control_defs():
             if c.kind != "action":
                 self.state[c.id] = c.default
@@ -423,9 +428,17 @@ class MockRX9070XT(MockBackend):
             Control(f"{P}.oc.zero_rpm", G, "Zero RPM mode", "bool", default=True),
             Control(f"{P}.oc.reset_od", G, "Reset OD table", "action", danger=1,
                     hint="Writes 'r' to pp_od_clk_voltage."),
+            Control(f"{P}.oc.vf_measured", G, "Measured V/F curve (GFX)", "curve", value=self.vfm.value(),
+                    unit="MHz", step=1, available=False,
+                    hint="Read-only: the clock the card actually ran at each GFX voltage (5 mV bins)."),
+            Control(f"{P}.oc.vf_measured_reset", G, "Clear measured V/F curve", "action",
+                    hint="Forget the collected V/F samples."),
         ]
 
     def action(self, control_id: str) -> tuple[bool, str]:
+        if control_id.endswith("vf_measured_reset"):
+            self.vfm.reset()
+            return True, "measured V/F curve cleared"
         if control_id.endswith("reset_od"):
             self.reset_ids(f"{self.P}.oc.")
             return True, "OD table reset"
@@ -445,6 +458,7 @@ class MockRX9070XT(MockBackend):
         else:
             fan_pct = 0.0 if zero_rpm else 25.0 + max(0.0, edge - 50) * 2
         vgfx = 0.700 + load * 0.4 + st[f"{P}.oc.vddgfx_offset"] / 1000 + n(0.003)
+        self.vfm.add(vgfx * 1000, sclk, load * 100)
         junction = None if self.rng.random() < 0.15 else edge + 9 + n(0.5)
         return [
             S("Clocks", f"{P}.clk.gfx", "GFX (shader) clock", sclk, "MHz"),

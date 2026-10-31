@@ -33,6 +33,7 @@ if __package__ in (None, ""):  # allow `python3 meat3/backends/amdgpu.py`
     __package__ = "meat3.backends"
 
 from ..core.model import Backend, Control, Sensor
+from .vf_measured import VfMeasured
 from . import amdgpu_metrics as gm
 from . import amdgpu_od as odm
 from . import amdgpu_pptable as ppt
@@ -299,6 +300,7 @@ class AmdGpuBackend(Backend):
         self._seen_metric_keys: list[str] = []
         self._seen_rows: dict[str, dict] = {}
         self._hwmon_rows = self._scan_hwmon()
+        self.vf_measured = VfMeasured()
         self.pptable = None
         self.is_smu14_dgpu = bool(self.mp1 and self.mp1[:2] == (14, 0) and not self.is_apu)
         self.full_slot = 0
@@ -545,6 +547,7 @@ class AmdGpuBackend(Backend):
             r = current.get(key) or dict(self._seen_rows[key], value=None)
             out.append(Sensor(f"{P}.gm.{key}", self._grp(r["cat"]), r["label"], r["value"],
                               r["unit"], r["decimals"], r["hint"]))
+        self._feed_vf(current)
         if self.mp1 and self.mp1[0] == 14 and "throttle_status" in self._seen_rows:
             out += self._smu14_throttle(current.get("throttle_status"))
         out += self._board_limits()
@@ -634,6 +637,23 @@ class AmdGpuBackend(Backend):
         if v is None or key is None or not v.last:
             return 1.0
         return float(v.last.get(key, {}).get("scale", 1.0))
+
+    @staticmethod
+    def _row_val(current: dict, *keys: str) -> Optional[float]:
+        for k in keys:
+            r = current.get(k)
+            if r is not None and r.get("value") is not None:
+                return float(r["value"])
+        return None
+
+    def _feed_vf(self, current: dict) -> None:
+        """One V/F sample per poll from gpu_metrics (voltage in mV, clock in MHz, activity in %)."""
+        mv = self._row_val(current, "voltage_gfx")
+        mhz = self._row_val(current, "current_gfxclk", "average_gfxclk_frequency")
+        busy = self._row_val(current, "average_gfx_activity")
+        if mv is not None and mv < 10:        # some rows are scaled to volts
+            mv *= 1000
+        self.vf_measured.add(mv, mhz, busy)
 
     def _smu14_throttle(self, row: Optional[dict]) -> list[Sensor]:
         """SMU14 raw throttle_status decoded with THROTTLER_*_BIT names (smu14_driver_if_v14_0.h).
@@ -895,6 +915,19 @@ class AmdGpuBackend(Backend):
                                         "OD table, including fan settings on SMU13/14)") +
                                   ("" if avail else " " + (st["reason"] or "no OD settings"))),
                           {"type": "od_reset"}))
+        if self._seen_rows.get("voltage_gfx") is not None or self.vf_measured.samples:
+            vfm = self.vf_measured.value()
+            specs.append((Control(f"{P}.oc.vf_measured", G, "Measured V/F curve (GFX)", "curve", value=vfm,
+                                  unit="MHz", step=1, danger=0, available=False,
+                                  hint=(f"Read-only: the clock the card actually ran at each GFX voltage "
+                                        f"({vfm['bin_mv']} mV bins, best and latest clock per bin, "
+                                        f"{vfm['samples']} samples so far). Load the GPU to fill it in; "
+                                        "it shows the effect of the clock/voltage offsets. RDNA2+ has no "
+                                        "editable curve points, so this cannot be dragged.")),
+                          {"type": "vf_measured"}))
+            specs.append((Control(f"{P}.oc.vf_measured_reset", G, "Clear measured V/F curve", "action",
+                                  danger=0, hint="Forget the collected V/F samples and start again."),
+                          {"type": "vf_measured_reset"}))
         if st["notes"]:
             for c, _m in specs:
                 if c.id.startswith(f"{P}.oc.od"):
@@ -1161,6 +1194,9 @@ class AmdGpuBackend(Backend):
                 idx = meta["profiles"][v]
                 self._write(meta["path"], f"{idx}\n")
                 return True, f"power profile set to {v} ({idx})"
+            if t == "vf_measured_reset":
+                self.vf_measured.reset()
+                return True, "measured V/F curve cleared"
             if t == "od_reset":
                 path = os.path.join(self.dev, "pp_od_clk_voltage")
                 self._write(path, "r\n")

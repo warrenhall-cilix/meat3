@@ -305,6 +305,16 @@ def _exercise(app, w, tmp, sock, osd_file, mock):
     oc.rows["nv0.oc.vf_curve"].curve.plot.reset()
     assert not oc.rows["nv0.oc.vf_curve"].dirty()
 
+    # measured (read-only) AMD curve: browsable, not editable, never dirty
+    mv = oc.rows["amd1.oc.vf_measured"]
+    assert mv.curve.plot.readonly and mv.editor.isEnabled() and not mv.apply_btn.isVisibleTo(oc)
+    assert len(mv.curve.plot.points) >= 30 and "bins" in mv.current.text()
+    mv.curve.plot.sel = 3
+    mv.curve.plot.set_selected(100)
+    mv.curve.plot.offset_all(50)
+    assert not mv.dirty() and mv.curve.plot.edit[3] == float(mv.curve.plot.points[3]["mhz"])
+    assert not mv.curve.sel_spin.isVisibleTo(oc) and not mv.curve.btn_flat.isVisibleTo(oc)
+
     # unavailable control is disabled and shows its hint
     fan = oc.rows["nv0.oc.fan_speed"]
     assert not fan.editor.isEnabled() and fan.hint.isVisibleTo(oc) and "manual" in fan.hint.text()

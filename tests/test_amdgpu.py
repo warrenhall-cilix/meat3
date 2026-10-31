@@ -677,6 +677,26 @@ class TestRdna4Extras(TreeCase):
         self.assertFalse(ok, msg)
         self.assertEqual(self.rec.calls, [])
 
+    def test_measured_vf_curve_from_metrics(self):
+        be = self.be
+        # the fixture metrics run at 97 % activity, 2950 MHz, 1050 mV: every poll adds one sample
+        be.sensors()
+        c = self.ctl("vf_measured")
+        self.assertEqual(c.kind, "curve")
+        self.assertFalse(c.available)
+        self.assertEqual(c.value["mode"], "measured")
+        self.assertEqual(c.value["points"], [])              # one sample is not yet a point
+        be.sensors()
+        c = self.ctl("vf_measured")
+        self.assertEqual(c.value["points"], [{"i": 0, "mv": 1050, "mhz": 2950, "last": 2950, "n": 2}])
+        self.assertIn("2 samples", c.hint)
+        ok, msg = be.apply("amdgpu0.oc.vf_measured", {"points": []})
+        self.assertFalse(ok)                                  # read-only
+        ok, msg = be.apply("amdgpu0.oc.vf_measured_reset", None)
+        self.assertTrue(ok, msg)
+        self.assertEqual(self.ctl("vf_measured").value["points"], [])
+        self.assertEqual(self.writes(), [])                   # nothing touched sysfs
+
     def test_smu14_throttle_names(self):
         from meat3.backends import amdgpu_pptable as P
         self.assertEqual(P.decode_smu14_throttle((1 << 2) | (1 << 14) | (1 << 20)),

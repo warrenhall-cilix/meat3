@@ -40,7 +40,11 @@ def fmt_control_value(c: dict, v: Any) -> str:
         if isinstance(v, dict) and v.get("points"):
             pts = v["points"]
             top = max(float(p.get("mhz") or 0) for p in pts)
+            if v.get("mode") == "measured":
+                return f"{len(pts)} bins, best {top:.0f} {c.get('unit') or ''}".strip()
             return f"{len(pts)} pts, top {top:.0f} {c.get('unit') or ''}".strip()
+        if isinstance(v, dict) and v.get("mode") == "measured":
+            return "no samples"
         if isinstance(v, dict) and v.get("deltas"):
             ds = [float(x) for x in v["deltas"].values()]
             return f"{len(ds)} deltas {min(ds):+.0f}..{max(ds):+.0f} {c.get('unit') or ''}".strip()
@@ -284,8 +288,12 @@ class ControlRow:
         self.label.setToolTip(c.get("hint") or "")
         self.hint.setText(c.get("hint") or "")
         self.hint.setVisible(not avail and bool(c.get("hint")))
-        self.editor.setEnabled(avail)
-        self.label.setEnabled(avail)
+        measured = self.kind == "curve" and isinstance(c.get("value"), dict) and c["value"].get("mode") == "measured"
+        self.editor.setEnabled(avail or measured)   # a measured curve is read-only but still browsable
+        self.label.setEnabled(avail or measured)
+        if measured:
+            self.apply_btn.setVisible(False)
+            self.hint.setVisible(False)
         if self.kind == "action":
             self.current.setText("")
         else:

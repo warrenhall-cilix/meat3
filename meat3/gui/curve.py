@@ -3,7 +3,8 @@
 Used by the Overclock tab for controls of kind "curve". The control's value is
     {"points": [{"i": idx, "mv": volt, "base": stock MHz, "mhz": current MHz, "delta": MHz, ...}],
      "lock": {"min": .., "max": ..}        optional per-point delta bounds (MHz)
-     "mode": "delta" | "absolute"}         delta: edits are MHz offsets per point (NVIDIA);
+     "mode": "delta" | "absolute" | "measured"}  delta: edits are MHz offsets per point (NVIDIA);
+                                            measured: read-only trace of what the card ran (AMD);
                                            absolute: points carry editable (mhz, mv) pairs (AMD OD_VDDC_CURVE)
 The widget's value() returns {"deltas": {idx: MHz}} in delta mode or {"points": [{"i","mhz","mv"}]} in
 absolute mode, containing every point (the daemon applies what differs).
@@ -67,8 +68,12 @@ class CurvePlot(QWidget):
             self.sel = None
         self.update()
 
+    @property
+    def readonly(self) -> bool:
+        return self.mode == "measured"
+
     def dirty(self) -> bool:
-        if not self.touched:
+        if not self.touched or self.readonly:
             return False
         for p, y, x in zip(self.points, self.edit, self.edit_mv):
             if abs(y - float(p.get("mhz") or 0)) > 1e-6 or (self.mode == "absolute" and abs(x - float(p.get("mv") or 0)) > 1e-6):
@@ -76,6 +81,8 @@ class CurvePlot(QWidget):
         return False
 
     def value(self) -> dict:
+        if self.readonly:
+            return {}
         if self.mode == "absolute":
             return {"points": [{"i": p["i"], "mhz": round(y), "mv": round(x)}
                                for p, y, x in zip(self.points, self.edit, self.edit_mv)]}
@@ -127,6 +134,8 @@ class CurvePlot(QWidget):
         return y
 
     def offset_all(self, mhz: float) -> None:
+        if self.readonly:
+            return
         self.edit = [self._clamp(i, y + mhz) for i, y in enumerate(self.edit)]
         self.touched = True
         self.update()
@@ -135,6 +144,8 @@ class CurvePlot(QWidget):
     def flatten_above(self) -> None:
         """Every point right of the selected one takes the selected point's clock (the Afterburner
         'flatten' move: the curve never asks for more clock above that voltage)."""
+        if self.readonly:
+            return
         if self.sel is None:
             return
         y = self.edit[self.sel]
@@ -145,6 +156,8 @@ class CurvePlot(QWidget):
         self.changed.emit()
 
     def set_selected(self, mhz: float) -> None:
+        if self.readonly:
+            return
         if self.sel is None:
             return
         self.edit[self.sel] = self._clamp(self.sel, _snap(mhz, self.step))
@@ -213,8 +226,9 @@ class CurvePlot(QWidget):
                   for p, x in zip(self.points, self.edit_mv)]
             i = min(range(len(xs)), key=lambda k: abs(xs[k] - e.position().x()))
         self.sel = i
-        self._drag = (i, e.position().y(), self.edit[i])
-        self.setCursor(Qt.ClosedHandCursor)
+        if not self.readonly:
+            self._drag = (i, e.position().y(), self.edit[i])
+            self.setCursor(Qt.ClosedHandCursor)
         self.update()
         self.changed.emit()
 
@@ -232,7 +246,7 @@ class CurvePlot(QWidget):
             h = self._nearest(e.position())
             if h != self.hover:
                 self.hover = h
-                self.setCursor(Qt.OpenHandCursor if h is not None else Qt.ArrowCursor)
+                self.setCursor(Qt.OpenHandCursor if h is not None and not self.readonly else Qt.ArrowCursor)
                 self.update()
 
     def mouseReleaseEvent(self, e):
@@ -245,6 +259,8 @@ class CurvePlot(QWidget):
         if self.sel is None:
             return super().keyPressEvent(e)
         step = self.step * (5 if e.modifiers() & Qt.ShiftModifier else 1)
+        if self.readonly and e.key() not in (Qt.Key_Left, Qt.Key_Right):
+            return super().keyPressEvent(e)
         if e.key() in (Qt.Key_Up, Qt.Key_Plus, Qt.Key_Equal):
             self.set_selected(self.edit[self.sel] + step)
         elif e.key() in (Qt.Key_Down, Qt.Key_Minus):
@@ -265,7 +281,8 @@ class CurvePlot(QWidget):
         p.fillRect(self.rect(), t.card)
         if not self.points:
             p.setPen(t.dim)
-            p.drawText(self.rect(), Qt.AlignCenter, "no curve points")
+            p.drawText(self.rect(), Qt.AlignCenter,
+                       "no samples yet: load the GPU" if self.mode == "measured" else "no curve points")
             return
         x0, x1, y0, y1 = self._ranges()
         fm = QFontMetrics(self.font())
@@ -292,6 +309,14 @@ class CurvePlot(QWidget):
             path = QPainterPath()
             for k, q in enumerate(self.points):
                 pt = self._to_px(float(q.get("mv") or 0), float(q.get("base") or 0))
+                path.moveTo(pt) if k == 0 else path.lineTo(pt)
+            pen = QPen(t.dim); pen.setStyle(Qt.DotLine); pen.setWidthF(1.2)
+            p.setPen(pen); p.drawPath(path)
+        # measured mode: the latest clock seen in each bin, dotted (best clock is the main trace)
+        if self.mode == "measured":
+            path = QPainterPath()
+            for k, q in enumerate(self.points):
+                pt = self._to_px(float(q.get("mv") or 0), float(q.get("last", q.get("mhz")) or 0))
                 path.moveTo(pt) if k == 0 else path.lineTo(pt)
             pen = QPen(t.dim); pen.setStyle(Qt.DotLine); pen.setWidthF(1.2)
             p.setPen(pen); p.drawPath(path)
@@ -328,6 +353,13 @@ class CurvePlot(QWidget):
             txt = f"point {q['i']}: {mv:.0f} mV  {self.edit[k]:.0f} MHz"
             if self.mode == "delta":
                 txt += f"  (stock {float(q.get('base') or 0):.0f}, delta {self.edit[k] - float(q.get('base') or 0):+.0f})"
+            elif self.mode == "measured":
+                txt = f"{mv:.0f} mV: best {self.edit[k]:.0f} MHz, last {float(q.get('last', q.get('mhz')) or 0):.0f} MHz, {q.get('n', 0)} samples"
+        elif self.mode == "measured":
+            txt = f"{len(self.points)} voltage bins measured" if self.points else ""
+            p.setPen(t.dim)
+            p.drawText(QRectF(r.left() + 6, r.top() + 2, r.width() - 12, fm.height()), Qt.AlignLeft, txt)
+        if k is not None:
             p.setPen(t.text)
             p.drawText(QRectF(r.left() + 6, r.top() + 2, r.width() - 12, fm.height()), Qt.AlignLeft, txt)
 
@@ -394,6 +426,9 @@ class CurveEditor(QWidget):
         else:
             self.sel_spin.setEnabled(False)
             self.sel_label.setText("select a point")
+        ro = self.plot.readonly
+        for w in (self.sel_spin, self.btn_flat, self.off_spin, self.btn_off, self.btn_reset):
+            w.setVisible(not ro)
         self.btn_flat.setEnabled(k is not None)
         self.btn_stock.setVisible(self.plot.mode == "delta")
         self.edited.emit()

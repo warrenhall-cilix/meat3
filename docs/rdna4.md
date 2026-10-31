@@ -94,6 +94,16 @@ encodings:
 `sudo bash tools/collect_amdgpu.sh` dumps the registers needed to check these, and whether the
 VRMs are reachable at all.
 
+## Measured V/F curve
+
+RDNA 2 and later expose no editable V/F points (only the SCLK and VDDGFX offsets), so the Overclock tab
+shows the curve the card actually runs instead: every poll the GFX voltage and clock from `gpu_metrics`
+are binned by voltage (5 mV) and the best and latest clock per bin are kept (control
+`amdgpuN.oc.vf_measured`, read-only; `amdgpuN.oc.vf_measured_reset` clears it). Idle samples (GFX
+activity below 20 % or clock below 500 MHz) are ignored. Load the GPU for a few minutes to fill it in;
+the trace moves when you change the offsets, which makes the effect of an undervolt visible as a curve
+rather than a single number. The samples live in the daemon and are lost on restart.
+
 ## `meat3-gputune`: undervolt finder
 
 Lowers the GFX voltage offset step by step while the GPU is under heavy load, and finds the lowest
