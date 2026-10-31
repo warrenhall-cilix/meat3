@@ -363,6 +363,33 @@ class TestRx9070xtOverclock(TreeCase):
         self.assertEqual(cs["amdgpu0.oc.od.fan_zero_rpm"].kind, "bool")
         self.assertIs(cs["amdgpu0.oc.od.fan_zero_rpm"].value, True)
 
+    def test_vddc_curve_control(self):
+        """RDNA1-style OD_VDDC_CURVE becomes one 'curve' control; apply writes only the changed points."""
+        txt = ("OD_SCLK:\n0: 800Mhz\n1: 2100Mhz\nOD_MCLK:\n1: 875MHz\nOD_VDDC_CURVE:\n"
+               "0: 800MHz 711mV\n1: 1450MHz 801mV\n2: 2100MHz 1200mV\nOD_RANGE:\n"
+               "SCLK:     800Mhz       2150Mhz\nMCLK:     625Mhz        950Mhz\n"
+               "VDDC_CURVE_SCLK[0]:     800Mhz       2150Mhz\nVDDC_CURVE_VOLT[0]:     750mV        1200mV\n"
+               "VDDC_CURVE_SCLK[1]:     800Mhz       2150Mhz\nVDDC_CURVE_VOLT[1]:     750mV        1200mV\n"
+               "VDDC_CURVE_SCLK[2]:     800Mhz       2150Mhz\nVDDC_CURVE_VOLT[2]:     750mV        1200mV\n")
+        with open(os.path.join(self.root, self.OD_FILE.lstrip("/")), "w") as f:
+            f.write(txt)
+        be = A.AmdGpuBackend.detect(self.root)[0]
+        be.io.writer = self.rec
+        c = {x.id: x for x in be.controls()}["amdgpu0.oc.od.vddc_curve"]
+        self.assertEqual(c.kind, "curve")
+        self.assertTrue(c.available, c.hint)
+        pts = c.value["points"]
+        self.assertEqual([(p["i"], p["mhz"], p["mv"]) for p in pts], [(0, 800, 711), (1, 1450, 801), (2, 2100, 1200)])
+        self.assertEqual(pts[2]["mv_range"], [750, 1200])
+        ok, msg = be.apply(c.id, {"points": [{"i": 0, "mhz": 800, "mv": 711}, {"i": 1, "mhz": 1500, "mv": 790},
+                                             {"i": 2, "mhz": 2150, "mv": 1200}]})
+        self.assertTrue(ok, msg)
+        self.assertEqual(self.writes(), [(self.OD_FILE, "vc 1 1500 790\n"), (self.OD_FILE, "vc 2 2150 1200\n"),
+                                         (self.OD_FILE, "c\n")])
+        ok, msg = be.apply(c.id, {"points": [{"i": 1, "mhz": 2200, "mv": 790}]})
+        self.assertFalse(ok)
+        self.assertIn("outside", msg)
+
     def test_sclk_offset_exact_writes(self):
         ok, msg = self.be.apply("amdgpu0.oc.od.sclk_offset", 150)
         self.assertTrue(ok, msg)

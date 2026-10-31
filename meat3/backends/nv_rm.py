@@ -36,6 +36,14 @@ CLK_RATIO_GET = 0x20809083           # 3096 B
 CLK_RATIO_SET = 0x2080d084           # 3096 B, privileged
 THERM_CHANNEL_INFO = 0x2080853a      # 15352 B (served; NVML uses it)
 THERM_CHANNEL_STATUS = 0x2080853b    # 14320 B
+# Client CLK VF points (the Afterburner/mVolt+ curve): layouts read on a GB203 with module v2/v4,
+# fields confirmed against the NVAPI leaf (nvapi64_impl FUN_1802062f0 / FUN_180208220).
+CLK_VF_INFO = 0x2080902a             # 804 B: +4..+0x24 E255 object mask (module v2)
+CLK_VF_STATUS = 0x2080902b           # 6160 B: entries @0x28 stride 0x18 (module v2)
+CLK_VF_CTRL_GET = 0x2080902c         # 4116 B: entries @0x24 stride 0x10 (module v2)
+CLK_VF_CTRL_SET = 0x2080d02d         # 4116 B, privileged (module v4)
+VF_GPC_TAG = 0x707                   # status tag of GPC (core) points; 0x404/0x606 = other domains
+VF_MAX_POINTS = 255
 
 DOMAIN_NAMES = {0x1: "GPC (core)", 0x2: "XBAR", 0x4: "SYS", 0x8: "HUB", 0x10: "Memory (MCLK)",
                 0x40: "UTILS", 0x80000: "PWR", 0x100000: "NVD (video)", 0x200000: "DISP"}
@@ -43,6 +51,24 @@ DOMAIN_NAMES = {0x1: "GPC (core)", 0x2: "XBAR", 0x4: "SYS", 0x8: "HUB", 0x10: "M
 
 def _iowr(nr: int, size: int) -> int:
     return (3 << 30) | (size << 16) | (ord("F") << 8) | nr
+
+
+def parse_vf_points(status: bytes, ctrl: bytes) -> list[dict]:
+    """Decode the GPC points of a CLK_VF_STATUS block plus the per-point deltas of the control block.
+    status entry (0x18 B @0x28): u32 tag, u32 freq_kHz (delta applied), u32 volt_uV, u32, u32 base_kHz, u32.
+    control entry (0x10 B @0x24): u8 type, u8, u16, u32 flag, s32 delta_kHz, u32."""
+    out = []
+    for i in range(VF_MAX_POINTS):
+        o = 0x28 + 0x18 * i
+        if o + 0x18 > len(status):
+            break
+        tag, f_khz, v_uv, _, base_khz, _ = struct.unpack_from("<6I", status, o)
+        if tag != VF_GPC_TAG or not f_khz:
+            continue
+        d_khz = struct.unpack_from("<i", ctrl, 0x24 + 0x10 * i + 8)[0] if 0x24 + 0x10 * i + 12 <= len(ctrl) else 0
+        out.append({"i": i, "mv": v_uv / 1000.0, "mhz": f_khz / 1000.0, "base": base_khz / 1000.0,
+                    "delta": d_khz / 1000.0})
+    return out
 
 
 class RMError(OSError):
@@ -217,6 +243,54 @@ class RMClient:
         st, _ = self.control(CLK_RATIO_SET, w)
         if st:
             raise RMError(f"ratio set status {st:#x}")
+
+    # ---- client VF curve (GPC points) ----
+
+    def vf_blocks(self) -> tuple[bytes, bytes, bytearray] | None:
+        """(info, status, control) raw blocks, each read with the object mask the info call returns."""
+        p = bytearray(804); p[0] = 0xFF; struct.pack_into("<I", p, 4, 0xFFFFFFFF)
+        st, info = self.control(CLK_VF_INFO, p)
+        if st:
+            return None
+        mask = bytes(info[4:0x24])
+        s = bytearray(6160); s[0] = 0xFF; s[4:0x24] = mask
+        st, status = self.control(CLK_VF_STATUS, s)
+        if st:
+            return None
+        c = bytearray(4116); c[0] = 0xFF; c[4:0x24] = mask
+        st, ctrl = self.control(CLK_VF_CTRL_GET, c)
+        if st:
+            return None
+        return bytes(info), bytes(status), bytearray(ctrl)
+
+    def vf_curve(self) -> list[dict] | None:
+        """GPC V/F points: [{'i', 'mv', 'mhz' (with delta), 'base' (MHz), 'delta' (MHz)}], ascending voltage."""
+        blocks = self.vf_blocks()
+        return None if blocks is None else parse_vf_points(blocks[1], blocks[2])
+
+    def set_vf_deltas(self, deltas: dict[int, float], max_abs_mhz: float = 1000.0) -> int:
+        """Read-modify-write the per-point frequency deltas (MHz) of the GPC points in `deltas`.
+        Refuses non-monotonic curves and deltas beyond +-max_abs_mhz. Returns the number of points written."""
+        blocks = self.vf_blocks()
+        if blocks is None:
+            raise RMError("VF point blocks unreadable (module v2+ needed)")
+        _, status, ctrl = blocks
+        pts = parse_vf_points(status, ctrl)
+        by_i = {p["i"]: p for p in pts}
+        for i, d in deltas.items():
+            if i not in by_i:
+                raise RMError(f"point {i} is not a GPC point")
+            if not -max_abs_mhz <= float(d) <= max_abs_mhz:
+                raise RMError(f"delta {d} MHz at point {i} outside +-{max_abs_mhz:g}")
+        new = [p["base"] + float(deltas.get(p["i"], p["delta"])) for p in pts]
+        if any(b < a - 0.01 for a, b in zip(new, new[1:])):
+            raise RMError("curve would not be monotonic (a higher voltage point below a lower one)")
+        for i, d in deltas.items():
+            struct.pack_into("<i", ctrl, 0x24 + 0x10 * i + 8, int(round(float(d) * 1000)))
+        st, _ = self.control(CLK_VF_CTRL_SET, ctrl)
+        if st:
+            raise RMError(f"VF set status {st:#x} (module v4 routes 0x2080d02d)")
+        return len(deltas)
 
     def read_regs(self, offsets: list[int]) -> dict[int, int | None]:
         """Read whitelisted BAR0 registers through RM GPU_EXEC_REG_OPS (documented in ctrl2080gpu.h;

@@ -513,6 +513,32 @@ class AmdCpuBackend(Backend):
             res[cpu] = r
         return res
 
+    def _ccd_clock_rows(self, group: str, core_eff: dict, core_act: dict, msr_ok: bool,
+                        msr_hint: str) -> list[Sensor]:
+        """One effective/active clock row per CCD (L3 domain): the CCD clock is its fastest core
+        (cores in a CCD share the same V/F domain; the busiest core defines the CCD's boost), plus
+        the mean of its cores' effective clocks. Single-CCD parts show one row labelled by the CCD."""
+        p = self.prefix
+        doms = self.topo.l3_domains or {0: list(self.topo.cpus)}
+        multi = len(doms) > 1
+        out: list[Sensor] = []
+        for i, (l3id, cpus) in enumerate(doms.items()):
+            cores = sorted({self.topo.core_of_cpu[c] for c in cpus if c in self.topo.core_of_cpu})
+            effs = [core_eff[k] for k in cores if k in core_eff]
+            acts = [core_act[k] for k in cores if k in core_act]
+            tag = f"CCD {i}" if multi else "CCD 0"
+            clist = f"cores {cores[0]}-{cores[-1]}" if cores else "no cores"
+            out.append(Sensor(f"{p}.ccd{i}.clk_eff", group, f"{tag} effective clock", max(effs) if effs else None,
+                              "MHz", 0, f"fastest core of the CCD ({clist}; L3 id {l3id})" + msr_hint))
+            out.append(Sensor(f"{p}.ccd{i}.clk_eff_avg", group, f"{tag} average effective clock",
+                              sum(effs) / len(effs) if effs else None, "MHz", 0,
+                              f"mean of the CCD's per-core effective clocks ({clist})"))
+            if msr_ok:
+                out.append(Sensor(f"{p}.ccd{i}.clk_active", group, f"{tag} active clock",
+                                  max(acts) if acts else None, "MHz", 0,
+                                  "fastest core's clock while in C0 (TSC x dAPERF/dMPERF)"))
+        return out
+
     def _cpufreq_khz(self, cpu: int) -> tuple[Optional[float], str]:
         base = os.path.join(self.sys_root, f"devices/system/cpu/cpu{cpu}/cpufreq")
         for f, h in (("cpuinfo_avg_freq", "cpufreq cpuinfo_avg_freq (kernel APERF/MPERF average)"),
@@ -534,9 +560,14 @@ class AmdCpuBackend(Backend):
         msr_hint = "" if msr_ok else f" (msr unavailable: {self.msr.error}; cpufreq fallback)"
 
         # --- clocks / usage per core
+        # Per-core clocks live under "<cpu>/Cores" (the Cores tab reads them by id); the Clocks
+        # group shows one row per CCD (L3 domain) instead of one per core.
         gc, gu, gt, gi = f"{g}/Clocks", f"{g}/Usage", f"{g}/Threads", f"{g}/C-states"
+        gcc = f"{g}/Cores"
         core_eff_all = []
         core_rows_clk, core_rows_act, core_rows_util, core_rows_c0 = [], [], [], []
+        core_eff: dict[int, float] = {}
+        core_act: dict[int, float] = {}
         base_mhz = None
         for k, cpus in enumerate(self.topo.cores):
             effs, acts, c0s, us = [], [], [], []
@@ -563,10 +594,13 @@ class AmdCpuBackend(Backend):
                 hint = self._cpufreq_khz(cpus[0])[1] + msr_hint
             if eff is not None:
                 core_eff_all.append(eff)
-            core_rows_clk.append(Sensor(f"{p}.core{k}.clk_eff", gc, f"Core {k} effective clock", eff, "MHz", 0,
+                core_eff[k] = eff
+            if act is not None:
+                core_act[k] = act
+            core_rows_clk.append(Sensor(f"{p}.core{k}.clk_eff", gcc, f"Core {k} effective clock", eff, "MHz", 0,
                                         hint))
             if msr_ok:
-                core_rows_act.append(Sensor(f"{p}.core{k}.clk_active", gc, f"Core {k} active clock", act, "MHz", 0,
+                core_rows_act.append(Sensor(f"{p}.core{k}.clk_active", gcc, f"Core {k} active clock", act, "MHz", 0,
                                             "TSC rate x dAPERF/dMPERF: clock while in C0"))
                 core_rows_c0.append(Sensor(f"{p}.core{k}.c0", gi, f"Core {k} C0 residency",
                                            max(c0s) if c0s else None, "%", 1, "dMPERF/dTSC, busiest thread"))
@@ -580,6 +614,7 @@ class AmdCpuBackend(Backend):
                           max(core_eff_all) if core_eff_all else None, "MHz", 0))
         out.append(Sensor(f"{p}.clk.base", gc, "Reference (TSC) clock", base_mhz, "MHz", 1,
                           "measured dTSC/dt; MPERF ticks at this rate" + msr_hint))
+        out += self._ccd_clock_rows(gc, core_eff, core_act, msr_ok, msr_hint)
         out += core_rows_clk + core_rows_act
         out.append(Sensor(f"{p}.util.total", gu, "Total CPU usage", util.get("cpu"), "%", 1, "/proc/stat"))
 

@@ -866,6 +866,27 @@ class AmdGpuBackend(Backend):
                                   unit=prm.unit, default=dflt, danger=prm.danger, hint=hint.strip(),
                                   available=avail),
                           {"type": "od", "param": prm}))
+        # OD_VDDC_CURVE (Vega20 / RDNA1): the per-point (clock, voltage) pairs as one curve control
+        vc: dict[int, dict] = {}
+        for prm in params:
+            m = re.fullmatch(r"vc(\d+)_(sclk|volt)", prm.key)
+            if m:
+                vc.setdefault(int(m.group(1)), {})[m.group(2)] = prm
+        if vc:
+            pts, ok = [], od_avail
+            for idx in sorted(vc):
+                s, v = vc[idx].get("sclk"), vc[idx].get("volt")
+                if s is None or v is None or s.value is None or v.value is None:
+                    ok = False
+                    continue
+                pts.append({"i": idx, "mhz": s.value, "mv": v.value, "base": s.value, "delta": 0,
+                            "mhz_range": [s.min, s.max], "mv_range": [v.min, v.max]})
+            specs.append((Control(f"{P}.oc.od.vddc_curve", G, "V/F curve (OD_VDDC_CURVE)", "curve",
+                                  value={"mode": "absolute", "points": pts}, unit="MHz", step=1, danger=2,
+                                  hint="Driver V/F curve points: clock and voltage per point ('vc <i> <MHz> <mV>' "
+                                       "then commit). RDNA2 and later expose no curve points, only the offset "
+                                       "knobs above.", available=bool(ok and pts)),
+                          {"type": "od_curve", "points": vc}))
         if st["exists"] or params:
             avail = od_avail and bool(st["params"])
             specs.append((Control(f"{P}.oc.od_reset", G, "Reset overdrive to stock", "action",
@@ -1066,6 +1087,8 @@ class AmdGpuBackend(Backend):
         c, meta = specs[control_id]
         if not c.available:
             return False, f"{c.label} is not available: {c.hint}"
+        if meta["type"] == "od_curve":
+            return self._apply_od_curve(c, meta["points"], value)
 
         # ---- validate ----
         if c.kind == "action":
@@ -1123,6 +1146,45 @@ class AmdGpuBackend(Backend):
             return False, f"write failed: {e.strerror or (os.strerror(e.errno) if e.errno else e)} " \
                           f"(driver rejected the value or insufficient permissions)"
         return False, "not supported"
+
+    def _apply_od_curve(self, c: Control, vc: dict, value: Any) -> tuple[bool, str]:
+        """Write every changed OD_VDDC_CURVE point ('vc <i> <MHz> <mV>'), then one commit."""
+        pts = value.get("points") if isinstance(value, dict) else None
+        if not isinstance(pts, list) or not pts:
+            return False, f"{c.label}: expected {{'points': [{{'i', 'mhz', 'mv'}}]}}"
+        cmds = []
+        for q in pts:
+            try:
+                i, mhz, mv = int(q["i"]), int(round(float(q["mhz"]))), int(round(float(q["mv"])))
+            except (KeyError, TypeError, ValueError):
+                return False, f"{c.label}: bad point {q!r}"
+            if i not in vc or "sclk" not in vc[i] or "volt" not in vc[i]:
+                return False, f"{c.label}: point {i} is not editable"
+            s, v = vc[i]["sclk"], vc[i]["volt"]
+            if mhz == s.value and mv == v.value:
+                continue                                  # untouched (stock points may sit outside OD_RANGE)
+            if s.min is None or s.max is None or v.min is None or v.max is None:
+                return False, f"{c.label}: point {i} has no driver range; refusing"
+            if not s.min <= mhz <= s.max or not v.min <= mv <= v.max:
+                return False, (f"{c.label}: point {i} ({mhz} MHz, {mv} mV) outside {s.min}..{s.max} MHz / "
+                               f"{v.min}..{v.max} mV")
+            cmds.append((f"vc {i} {mhz} {mv}", s.file))
+        if not cmds:
+            return True, f"{c.label}: no point changed"
+        if self.is_apu and self._perf_level() != "manual":
+            return False, "APU overdrive edits need performance level 'manual' first"
+        path = os.path.join(self.dev, cmds[0][1])
+        km = _KmsgTail()
+        try:
+            for cmd, _ in cmds:
+                self._write(path, cmd + "\n")
+            self._write(path, "c\n")
+        except OSError as e:
+            why = km.amdgpu_lines()
+            return False, f"write failed: {os.strerror(e.errno) if e.errno else e}" + (f"; driver said: {why}" if why else "")
+        finally:
+            km.close()
+        return True, f"{c.label}: {len(cmds)} points written and committed"
 
     def _apply_od(self, prm: odm.OdParam, v: int, specs: dict) -> tuple[bool, str]:
         P = self.prefix

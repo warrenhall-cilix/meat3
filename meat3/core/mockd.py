@@ -54,6 +54,19 @@ def validate(c: Control, value: Any) -> tuple[bool, str, Any]:
         if value not in c.choices:
             return False, f"{c.label}: {value!r} is not one of {c.choices}", None
         return True, "", value
+    if c.kind == "curve":
+        if not isinstance(value, dict) or not isinstance(value.get("deltas", value.get("points")), (dict, list)):
+            return False, f"{c.label}: expected {{'deltas': {{point: MHz}}}}", None
+        if "deltas" in value:
+            try:
+                d = {int(k): float(v) for k, v in value["deltas"].items()}
+            except (TypeError, ValueError):
+                return False, f"{c.label}: deltas must map point index to MHz", None
+            for k, v in d.items():
+                if c.min is not None and v < c.min or c.max is not None and v > c.max:
+                    return False, f"{c.label}: delta {v:g} at point {k} outside {c.min:g}..{c.max:g}", None
+            return True, "", {"deltas": d}
+        return True, "", value
     if c.kind in ("int", "float"):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return False, f"{c.label}: expected a number", None
@@ -140,7 +153,7 @@ class MockBackend(Backend):
         with self.lock:
             out = []
             for c in self.control_defs():
-                if c.kind != "action":
+                if c.kind not in ("action", "curve"):      # a curve control carries its own live value
                     c.value = self.state.get(c.id, c.default)
                 out.append(c)
             return out
@@ -214,12 +227,51 @@ class MockRTX5080(MockBackend):
                     hint="Fixed fan duty." if manual else "Set Fan control to 'manual' first."),
             Control(f"{P}.oc.clock_lock", G, "Lock GPC clock at max boost", "bool", default=False,
                     danger=1, hint="Locks the GPC clock, disables idle downclocking."),
+            Control(f"{P}.oc.vf_curve", G, "V/F curve (GPC)", "curve", value=self._vf_value(), min=-1000,
+                    max=1000, step=5, unit="MHz", default={"deltas": {}}, danger=1,
+                    hint="Per-point clock deltas on the GPC V/F curve (voltage per point is fixed)."),
             Control(f"{P}.oc.reset_vf", G, "Reset V/F curve to stock", "action", danger=1,
                     hint="Clears offsets, voltage cap and clock lock."),
         ]
 
+    # a GB203-like curve: 127 points, 450..1240 mV, stock clocks rising to 3300 MHz
+    VF_MV = [450 + 25 * i for i in range(12)] + [750 + 5 * i for i in range(115)]
+
+    def _vf_base(self, i: int) -> float:
+        mv = self.VF_MV[i]
+        return 255.0 if mv < 750 else round(255 + (mv - 750) * 6.2 + (mv - 750) ** 2 * -0.0012, 0)
+
+    def _vf_value(self) -> dict:
+        deltas = getattr(self, "vf_deltas", {}) or {}
+        off = float(self.state.get(f"{self.P}.oc.core_offset", 0) or 0)
+        pts = []
+        for i in range(len(self.VF_MV)):
+            b = self._vf_base(i)
+            d = float(deltas.get(i, off))
+            pts.append({"i": i, "mv": float(self.VF_MV[i]), "base": b, "mhz": b + d, "delta": d})
+        return {"mode": "delta", "points": pts, "lock": {"min": -1000, "max": 1000}, "max_mhz": pts[-1]["mhz"]}
+
+    def apply(self, control_id: str, value: Any) -> tuple[bool, str]:
+        if control_id == f"{self.P}.oc.vf_curve":
+            ctrl = {c.id: c for c in self.controls()}[control_id]
+            ok, msg, v = validate(ctrl, value)
+            if not ok:
+                return False, msg
+            with self.lock:
+                d = dict(getattr(self, "vf_deltas", {}) or {})
+                d.update(v["deltas"])
+                if not v["deltas"]:
+                    d = {}
+                self.vf_deltas = d
+            return True, f"V/F curve: {len(v['deltas'])} point deltas written"
+        ok, msg = super().apply(control_id, value)
+        if ok and control_id == f"{self.P}.oc.core_offset":
+            self.vf_deltas = {}                     # a uniform offset rewrites every point (as the real driver)
+        return ok, msg
+
     def action(self, control_id: str) -> tuple[bool, str]:
         if control_id.endswith("reset_vf"):
+            self.vf_deltas = {}
             for k in ("core_offset", "mem_offset", "nvvdd_max", "clock_lock"):
                 cid = f"{self.P}.oc.{k}"
                 c = next(c for c in self.control_defs() if c.id == cid)

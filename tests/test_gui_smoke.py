@@ -285,6 +285,26 @@ def _exercise(app, w, tmp, sock, osd_file, mock):
     _wait(app, lambda: not oc.rows["nv0.oc.core_offset"].dirty(), 5, "row clean")
     assert "150 MHz" in oc.rows["nv0.oc.core_offset"].current.text()
 
+    # V/F curve editor: select the 1200 mV point, drop it to 3000 MHz, flatten above, apply
+    vf = oc.rows["nv0.oc.vf_curve"]
+    plot = vf.curve.plot
+    assert len(plot.points) == 127 and plot.mode == "delta" and not vf.dirty(), (len(plot.points), plot.mode, vf.dirty(), plot.touched, vf.c.get("available"), vf.c.get("value", {}).get("points", [])[:1])
+    p1200 = next(i for i, p in enumerate(plot.points) if p["mv"] == 1200)
+    plot.sel = p1200
+    plot.set_selected(3000)
+    plot.flatten_above()
+    assert vf.dirty() and all(y <= 3000 for y in plot.edit[p1200:])
+    v = vf.value()
+    assert "deltas" in v and v["deltas"][str(plot.points[p1200]["i"])] == 3000 - plot.points[p1200]["base"]
+    assert oc.apply_rows([vf])
+    _wait(app, lambda: ctrl("nv0.oc.vf_curve")["value"]["points"][p1200]["mhz"] == 3000, 5, "curve applied")
+    _wait(app, lambda: not oc.rows["nv0.oc.vf_curve"].dirty(), 5, "curve row clean")
+    assert "top 3000" in oc.rows["nv0.oc.vf_curve"].current.text()
+    oc.rows["nv0.oc.vf_curve"].curve.plot.stock()
+    assert oc.rows["nv0.oc.vf_curve"].dirty()
+    oc.rows["nv0.oc.vf_curve"].curve.plot.reset()
+    assert not oc.rows["nv0.oc.vf_curve"].dirty()
+
     # unavailable control is disabled and shows its hint
     fan = oc.rows["nv0.oc.fan_speed"]
     assert not fan.editor.isEnabled() and fan.hint.isVisibleTo(oc) and "manual" in fan.hint.text()

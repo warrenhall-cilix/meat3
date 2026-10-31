@@ -36,6 +36,20 @@ def _try(fn, *a, default=None):
         return default
 
 
+def module_routes(marker: bytes) -> bool:
+    """True when the loaded nvidia.ko carries `marker` (a meat3/nvoc route-entry name): a cheap, read-only
+    way to know which patched-module level is running without issuing the control."""
+    try:
+        import subprocess
+        path = subprocess.run(["modinfo", "-n", "nvidia"], capture_output=True, text=True, timeout=5).stdout.strip()
+        if not path or not os.path.exists(path):
+            return False
+        with open(path, "rb") as f:
+            return marker in f.read()
+    except Exception:
+        return False
+
+
 class NvidiaGPU(Backend):
     kind = "gpu"
 
@@ -71,10 +85,12 @@ class NvidiaGPU(Backend):
         self.rm = None
         self.domains = {}            # domain bit -> object index / ranges
         self.patched = False
+        self.vf_set = False          # module v4+: the client VF-point setter (0x2080d02d) is routed to GSP
         try:
             self.rm = nv_rm.RMClient(index)
             self.domains = {d["domain"]: d for d in self.rm.clock_domains()}
             self.patched = self.rm.volt_rails_status() is not None
+            self.vf_set = self.patched and module_routes(b"nvre_clkVfControlSet")
         except Exception as e:
             print(f"meat3: RM client unavailable for GPU {index}: {e}")
             self.rm = None
@@ -321,6 +337,7 @@ class NvidiaGPU(Backend):
                          value=vo[0] if vo else None, min=-150, max=50, step=5, unit="mV", default=0, danger=2,
                          hint=patched_hint or "Negative = hard undervolt cap; positive is capped by ALT/OV",
                          available=bool(self.patched and vo)))
+        C.append(self._vf_control())
         for r in self._ratios():
             if {r.get("src_bit"), r.get("dst_bit")} & {0x2, 0x4, 0x100000} and r["current"] is not None:
                 C.append(Control(f"{p}.oc.ratio_{r['index']}", g, f"Clock ratio {r['name']}", "float",
@@ -331,7 +348,54 @@ class NvidiaGPU(Backend):
                                       "ratio'). Firmware does no range check; meat3 caps at +10%."))
         return C
 
+    def _vf_control(self) -> Control:
+        """The GPC V/F curve as one 'curve' control: per-point frequency deltas (what Afterburner's curve
+        editor and mVolt+ edit). Reading needs module v2, writing module v4."""
+        p, g = self.p, self.name
+        pts = _try(self.rm.vf_curve) if self.rm and self.patched else None
+        gmax = _try(N.nvmlDeviceGetMaxClockInfo, self.h, N.NVML_CLOCK_GRAPHICS)
+        d = self.domains.get(0x1)
+        lo, hi = (max(d["min"], -1000), min(d["max"], 1000)) if d else (-1000, 1000)
+        value = {"mode": "delta", "points": pts or [], "lock": {"min": lo, "max": hi}, "max_mhz": gmax}
+        if not self.patched:
+            hint = "Needs the meat3/nvoc patched NVIDIA open module (v2 to read, v4 to write)"
+        elif not self.vf_set:
+            hint = "Curve is read-only on this module: the setter (0x2080d02d) is routed from module v4"
+        else:
+            hint = ("Per-point clock on the GPC V/F curve (voltage per point is fixed by the firmware). Drag "
+                    "points, 'Flatten above' a point so no higher clock exists above that voltage. The firmware "
+                    "only uses points up to its own request ceiling; a uniform 'Core clock offset' rewrites "
+                    "every point's delta.")
+        return Control(f"{p}.oc.vf_curve", g, "V/F curve (GPC)", "curve", value=value, min=lo, max=hi, step=5,
+                       unit="MHz", default={"deltas": {}}, danger=1, hint=hint,
+                       available=bool(self.vf_set and pts))
+
+    def _apply_vf(self, value) -> tuple[bool, str]:
+        if not self.vf_set:
+            return False, "V/F curve writes need module v4"
+        if not isinstance(value, dict):
+            return False, "value must be {'deltas': {point: MHz}}"
+        raw = value.get("deltas")
+        if raw == {} or raw is None and value.get("stock"):
+            pts = _try(self.rm.vf_curve) or []
+            raw = {p["i"]: 0 for p in pts}
+        if not isinstance(raw, dict) or not raw:
+            return False, "no deltas given"
+        try:
+            deltas = {int(k): float(v) for k, v in raw.items()}
+        except (TypeError, ValueError):
+            return False, "deltas must map point index to MHz"
+        d = self.domains.get(0x1)
+        lim = min(1000.0, float(d["max"]), -float(d["min"])) if d else 1000.0
+        try:
+            n = self.rm.set_vf_deltas(deltas, max_abs_mhz=lim)
+        except Exception as e:
+            return False, f"failed: {e}"
+        return True, f"V/F curve: {n} point deltas written"
+
     def apply(self, control_id: str, value) -> tuple[bool, str]:
+        if control_id.endswith(".oc.vf_curve"):
+            return self._apply_vf(value)
         if ".oc.ratio_" in control_id:
             ctl = {c.id: c for c in self.controls()}.get(control_id)
             if ctl is None or not ctl.available:

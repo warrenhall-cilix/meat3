@@ -312,6 +312,13 @@ class TestCounters(Base):
         # core 0 = max of threads 0 and 8
         self.assertAlmostEqual(s["cpu0.core0.clk_eff"].value, 2700.0, places=1)
         self.assertAlmostEqual(s["cpu0.core1.clk_eff"].value, 540.0, places=1)
+        # per-CCD rows in the Clocks group; per-core clock rows moved to the Cores group
+        self.assertAlmostEqual(s["cpu0.ccd0.clk_eff"].value, 2700.0, places=1)       # fastest core
+        self.assertAlmostEqual(s["cpu0.ccd0.clk_active"].value, 5400.0, places=1)
+        self.assertGreater(s["cpu0.ccd0.clk_eff_avg"].value, 0)
+        self.assertTrue(s["cpu0.ccd0.clk_eff"].group.endswith("/Clocks"))
+        self.assertTrue(s["cpu0.core0.clk_eff"].group.endswith("/Cores"))
+        self.assertNotIn("cpu0.ccd1.clk_eff", s)                                       # single-CCD fixture
         self.assertAlmostEqual(s["cpu0.core3.power"].value, 3.0, places=3)
         self.assertAlmostEqual(s["cpu0.msr.cores_power"].value, 24.0, places=3)
         self.assertAlmostEqual(s["cpu0.msr.pkg_power"].value, 10.0, places=3)

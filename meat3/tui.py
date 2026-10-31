@@ -46,12 +46,54 @@ def load_pins(path: str) -> list[dict]:
             if isinstance(p, dict) and isinstance(p.get("id"), str)]
 
 
-def save_pins(path: str, pins: list[dict]) -> None:
+def _load_cfg(path: str) -> dict:
+    try:
+        with open(path) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_cfg(path: str, **fields) -> None:
+    d = _load_cfg(path)
+    d.update(fields)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
-        json.dump({"pins": pins}, f, indent=1)
+        json.dump(d, f, indent=1)
     os.replace(tmp, path)
+
+
+def save_pins(path: str, pins: list[dict]) -> None:
+    _save_cfg(path, pins=pins)
+
+
+THEMES = ("dark", "light")
+
+
+def load_theme(path: str) -> Optional[str]:
+    t = _load_cfg(path).get("theme")
+    return t if t in THEMES else None
+
+
+def save_theme(path: str, theme: str) -> None:
+    _save_cfg(path, theme=theme)
+
+
+def detect_theme(env: Optional[dict] = None) -> str:
+    """'light' or 'dark' for the terminal: MEAT3_TUI_THEME wins, then COLORFGBG (set by xterm, rxvt,
+    Konsole and others as 'fg;bg' with 7/15 = light background), else dark."""
+    env = os.environ if env is None else env
+    t = (env.get("MEAT3_TUI_THEME") or "").strip().lower()
+    if t in THEMES:
+        return t
+    fgbg = env.get("COLORFGBG", "")
+    if ";" in fgbg:
+        bg = fgbg.rsplit(";", 1)[1].strip()
+        if bg in ("7", "15") or bg.isdigit() and 7 <= int(bg) <= 15 and bg != "8":
+            return "light"
+    return "dark"
 
 
 def graph_rows(vals, width: int, height: int, lo: Optional[float] = None, hi: Optional[float] = None) -> list[str]:
@@ -261,12 +303,14 @@ def overview_rows(p: str, order: list[str], sensors: dict) -> list[tuple]:
 
 
 class Tui:
-    def __init__(self, scr, client: Client, interval: float, pins_file: Optional[str] = None):
+    def __init__(self, scr, client: Client, interval: float, pins_file: Optional[str] = None,
+                 theme: str = "auto"):
         self.scr = scr
         self.c = client
         self.interval = interval
         self.pins_file = pins_file or pins_path()
         self.pins = load_pins(self.pins_file)
+        self.theme = theme if theme in THEMES else (load_theme(self.pins_file) or detect_theme())
         self.hist: dict[str, collections.deque] = {}
         self.view = 0
         self.sensors: dict[str, dict] = {}
@@ -294,15 +338,24 @@ class Tui:
         except curses.error:
             bg = curses.COLOR_BLACK
         rich = curses.COLORS >= 256
-        pairs = {  # name: (fg 256, fg 8)
-            "accent": (209, curses.COLOR_RED), "dim": (245, curses.COLOR_WHITE), "ok": (114, curses.COLOR_GREEN),
-            "warn": (221, curses.COLOR_YELLOW), "crit": (203, curses.COLOR_RED), "title": (255, curses.COLOR_WHITE),
-            "bar": (173, curses.COLOR_RED), "bar2": (75, curses.COLOR_CYAN), "head": (16, curses.COLOR_BLACK),
-        }
+        if self.theme == "light":
+            pairs = {  # name: (fg 256, fg 8) chosen for a white/light background
+                "accent": (166, curses.COLOR_RED), "dim": (243, curses.COLOR_BLACK), "ok": (28, curses.COLOR_GREEN),
+                "warn": (130, curses.COLOR_MAGENTA), "crit": (160, curses.COLOR_RED), "title": (16, curses.COLOR_BLACK),
+                "bar": (166, curses.COLOR_RED), "bar2": (25, curses.COLOR_BLUE), "head": (231, curses.COLOR_WHITE),
+            }
+            head_bg = (166, curses.COLOR_RED)
+        else:
+            pairs = {  # name: (fg 256, fg 8)
+                "accent": (209, curses.COLOR_RED), "dim": (245, curses.COLOR_WHITE), "ok": (114, curses.COLOR_GREEN),
+                "warn": (221, curses.COLOR_YELLOW), "crit": (203, curses.COLOR_RED), "title": (255, curses.COLOR_WHITE),
+                "bar": (173, curses.COLOR_RED), "bar2": (75, curses.COLOR_CYAN), "head": (16, curses.COLOR_BLACK),
+            }
+            head_bg = (209, curses.COLOR_RED)
         self.cp = {}
         for i, (name, (c256, c8)) in enumerate(pairs.items(), start=1):
             if name == "head":
-                curses.init_pair(i, c256 if rich else c8, 209 if rich else curses.COLOR_RED)
+                curses.init_pair(i, c256 if rich else c8, head_bg[0] if rich else head_bg[1])
             else:
                 curses.init_pair(i, c256 if rich else c8, bg)
             self.cp[name] = curses.color_pair(i)
@@ -444,10 +497,10 @@ class Tui:
         self.put(0, max(x, w - len(info)), info, self.cp["head"])
         body_h = h - 2
         keys = {0: ("↑↓ select pin  g graph/value  x unpin  [ ] move  a add  " if self.pins else
-                    "a add sensors  ") + "Tab views  o OSD  h hotkey  r reset  u update  q quit",
-                1: "↑↓ PgUp/PgDn move  a pin to Overview  g pin as graph  / filter  Esc clear  o OSD  q quit",
-                2: "↑↓ scroll  o OSD  r reset  u update  q quit",
-                3: "↑↓ select  Enter set value  o OSD  u update  q quit"}[self.view]
+                    "a add sensors  ") + "Tab views  o OSD  h hotkey  r reset  u update  T theme  q quit",
+                1: "↑↓ PgUp/PgDn move  a pin to Overview  g pin as graph  / filter  Esc clear  o OSD  T theme  q quit",
+                2: "↑↓ scroll  o OSD  r reset  u update  T theme  q quit",
+                3: "↑↓ select  Enter set value  o OSD  u update  T theme  q quit"}[self.view]
         status = self.msg if self.msg and time.time() - self.msg_t < 6 else keys
         self.put(h - 1, 0, " " * (w - 1), self.cp["dim"])
         self.put(h - 1, 1, status, self.cp["accent"] if status == self.msg else self.cp["dim"])
@@ -750,8 +803,12 @@ class Tui:
             danger = {0: " ", 1: "!", 2: "‼"}.get(c.get("danger", 0), "‼")
             val = c.get("value")
             dec = 3 if isinstance(val, float) and not val.is_integer() else 0
-            vs = "—" if val is None else (f"{val}" if c.get("kind") in ("choice", "bool") else
-                                         format_value(val, dec, c.get("unit", "")))
+            if c.get("kind") == "curve":
+                n = len((val or {}).get("points") or []) if isinstance(val, dict) else 0
+                vs = f"{n} pts (GUI)" if n else "—"
+            else:
+                vs = "—" if val is None else (f"{val}" if c.get("kind") in ("choice", "bool") else
+                                             format_value(val, dec, c.get("unit", "")))
             rng = ""
             if c.get("kind") in ("int", "float") and c.get("min") is not None:
                 rng = f"[{c['min']:g}..{c['max']:g}]"
@@ -881,6 +938,15 @@ class Tui:
         v = self.view
         if ch in ("q", "Q"):
             return False
+        if ch == "T":
+            self.theme = "light" if self.theme == "dark" else "dark"
+            self._colors()
+            try:
+                save_theme(self.pins_file, self.theme)
+            except OSError:
+                pass
+            self.flash(f"{self.theme} theme (T toggles; MEAT3_TUI_THEME or --theme to force)")
+            return True
         if ch in ("1", "2", "3", "4"):
             self.view = int(ch) - 1
         elif ch == "\t":
@@ -958,12 +1024,15 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="meat3-tui", description="meat³ terminal UI")
     ap.add_argument("--socket", default=os.environ.get("MEAT3_SOCKET", "/run/meat3/meat3.sock"))
     ap.add_argument("--interval", type=float, default=1.0, help="refresh interval in seconds")
+    ap.add_argument("--theme", choices=("auto", "dark", "light"), default="auto",
+                    help="colour scheme for the terminal background (auto: saved choice, then MEAT3_TUI_THEME, "
+                         "then COLORFGBG, else dark; T toggles at runtime and saves)")
     args = ap.parse_args(argv)
     locale.setlocale(locale.LC_ALL, "")
     os.environ.setdefault("ESCDELAY", "25")
     client = Client(args.socket)
     try:
-        curses.wrapper(lambda scr: Tui(scr, client, max(0.2, args.interval)).run())
+        curses.wrapper(lambda scr: Tui(scr, client, max(0.2, args.interval), theme=args.theme).run())
     except KeyboardInterrupt:
         pass
     finally:

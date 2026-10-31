@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QGr
 
 from meat3.core.fmt import NONE_TEXT
 from meat3.gui.common import config_dir, device_badge, mono_font, theme
+from meat3.gui.curve import CurveEditor
 
 
 def profiles_dir() -> Path:
@@ -35,6 +36,15 @@ def fmt_control_value(c: dict, v: Any) -> str:
     k = c.get("kind")
     if k == "bool":
         return "on" if v else "off"
+    if k == "curve":
+        if isinstance(v, dict) and v.get("points"):
+            pts = v["points"]
+            top = max(float(p.get("mhz") or 0) for p in pts)
+            return f"{len(pts)} pts, top {top:.0f} {c.get('unit') or ''}".strip()
+        if isinstance(v, dict) and v.get("deltas"):
+            ds = [float(x) for x in v["deltas"].values()]
+            return f"{len(ds)} deltas {min(ds):+.0f}..{max(ds):+.0f} {c.get('unit') or ''}".strip()
+        return "stock" if isinstance(v, dict) else NONE_TEXT
     if k == "float":
         v = f"{float(v):.{_decimals(c.get('step'))}f}"
     elif k == "int":
@@ -85,7 +95,7 @@ class ControlRow:
         h = QHBoxLayout(self.editor)
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(8)
-        self.slider = self.spin = self.combo = self.check = self.button = None
+        self.slider = self.spin = self.combo = self.check = self.button = self.curve = None
         if self.kind in ("int", "float"):
             lo, hi, step = c.get("min"), c.get("max"), c.get("step") or (1 if self.kind == "int" else 0.01)
             self.step = float(step)
@@ -130,6 +140,10 @@ class ControlRow:
             self.button.clicked.connect(lambda: self.page.apply_rows([self]))
             h.addWidget(self.button)
             h.addStretch(1)
+        elif self.kind == "curve":
+            self.curve = CurveEditor()
+            self.curve.edited.connect(self._edited)
+            h.addWidget(self.curve, 1)
 
         self.current = QLabel()
         self.current.setFont(mono_font())
@@ -144,11 +158,24 @@ class ControlRow:
         if self.kind == "action":
             self.apply_btn.setVisible(False)
 
-        grid.addWidget(lab, row, 0, Qt.AlignVCenter)
-        grid.addWidget(self.editor, row, 1)
-        grid.addWidget(self.current, row, 2)
-        grid.addWidget(self.mark, row, 3)
-        grid.addWidget(self.apply_btn, row, 4)
+        if self.kind == "curve":
+            # the editor takes the whole width under its label row
+            grid.addWidget(lab, row, 0, Qt.AlignTop)
+            side = QWidget()
+            sv = QVBoxLayout(side)
+            sv.setContentsMargins(0, 0, 0, 0)
+            sv.addWidget(self.current)
+            sv.addWidget(self.mark)
+            sv.addWidget(self.apply_btn)
+            sv.addStretch(1)
+            grid.addWidget(self.editor, row, 1, 1, 3)
+            grid.addWidget(side, row, 4, Qt.AlignTop)
+        else:
+            grid.addWidget(lab, row, 0, Qt.AlignVCenter)
+            grid.addWidget(self.editor, row, 1)
+            grid.addWidget(self.current, row, 2)
+            grid.addWidget(self.mark, row, 3)
+            grid.addWidget(self.apply_btn, row, 4)
         self.update_control(c, force=True)
 
     # helpers -----------------------------------------------------------
@@ -202,6 +229,8 @@ class ControlRow:
             return self.combo.currentData()
         if self.check is not None:
             return self.check.isChecked()
+        if self.curve is not None:
+            return self.curve.value()
         return True
 
     def set_value(self, v: Any) -> None:
@@ -209,7 +238,12 @@ class ControlRow:
             return
         self._sync = True
         try:
-            if self.spin is not None:
+            if self.curve is not None:
+                if isinstance(v, dict) and "points" in v and "mode" in v:
+                    self.curve.load({**self.c, "value": v})     # a full control value: reload the plot
+                else:
+                    self.curve.set_value(v)                       # an edit / profile value
+            elif self.spin is not None:
                 self.spin.setValue(float(v) if self.kind == "float" else int(round(float(v))))
                 if self.slider is not None:
                     self.slider.setValue(int(round((float(v) - (self.c.get("min") or 0)) / self.step)))
@@ -226,6 +260,8 @@ class ControlRow:
     def dirty(self) -> bool:
         if self.kind == "action" or not self.c.get("available", True):
             return False
+        if self.curve is not None:
+            return self.curve.dirty()
         if self.c.get("value") is None and not getattr(self, "_touched", False):
             return False
         return not values_equal(self.c, self.value(), self.c.get("value"))
@@ -254,7 +290,11 @@ class ControlRow:
             self.current.setText("")
         else:
             self.current.setText(fmt_control_value(c, c.get("value")))
-        if not was_dirty and self.kind != "action":
+        if self.curve is not None:
+            self._sync = True
+            self.curve.load(c)            # keeps the user's edits while touched, follows the card otherwise
+            self._sync = False
+        elif not was_dirty and self.kind != "action":
             self._sync = True
             self.set_value(c.get("value") if c.get("value") is not None else c.get("default"))
             self._sync = False

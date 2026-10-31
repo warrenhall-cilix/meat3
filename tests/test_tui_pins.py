@@ -45,6 +45,23 @@ class PinsFileTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp)
         self.path = os.path.join(self.tmp, "meat3", "tui.json")
 
+    def test_theme_persists_beside_pins(self):
+        tui.save_pins(self.path, [{"id": "a", "graph": False}])
+        self.assertIsNone(tui.load_theme(self.path))
+        tui.save_theme(self.path, "light")
+        self.assertEqual(tui.load_theme(self.path), "light")
+        self.assertEqual(tui.load_pins(self.path), [{"id": "a", "graph": False}])   # pins survive
+        tui.save_pins(self.path, [])
+        self.assertEqual(tui.load_theme(self.path), "light")                         # theme survives
+
+    def test_detect_theme(self):
+        self.assertEqual(tui.detect_theme({}), "dark")
+        self.assertEqual(tui.detect_theme({"COLORFGBG": "15;0"}), "dark")          # light text on black
+        self.assertEqual(tui.detect_theme({"COLORFGBG": "0;15"}), "light")
+        self.assertEqual(tui.detect_theme({"COLORFGBG": "0;default;7"}), "light")
+        self.assertEqual(tui.detect_theme({"COLORFGBG": "0;15", "MEAT3_TUI_THEME": "dark"}), "dark")
+        self.assertEqual(tui.detect_theme({"MEAT3_TUI_THEME": "Light"}), "light")
+
     def test_roundtrip_and_bad_files(self):
         self.assertEqual(tui.load_pins(self.path), [])
         tui.save_pins(self.path, [{"id": "nv0.t.hotspot", "graph": True}, {"id": "cpu0.pmt.ppt", "graph": False}])
