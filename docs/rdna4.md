@@ -14,6 +14,7 @@ On a real ASUS RX 9070 XT (VBIOS 115-G295BP00-100), Manjaro, kernel 7.2:
 | VRM telemetry and VRM controls over PMBus | **Depends on the SMU firmware version.** AMD's PMFW stopped exposing the regulators on the "AMDGPU SMU" I2C buses after `smu_14_0_3.bin` 0x684a00 (linux-firmware 2025-06-20, release 20251111). With 0x684b00 (2025-11-19) or newer the buses answer at no address and meat³ shows "VRM controllers: not reachable" with the firmware version. With the older firmware the two MP2868A controllers at 0x22 and 0x24 answer, and meat³ reads their page-2 telemetry gains (the registers fpsflow's `power_limit_removal` scripts scale to lift TBP/TDC) and corrects its power and current readings by the active scale |
 | `meat3-gputune` | Uses the driver's own voltage offset, so it doesn't need the VRMs |
 | `meat3-skutable` and the patched amdgpu | Not yet tested on hardware |
+| TBP/TDC scaling (`vrm.tbp_scale`, `vrm.tdc_scale`) and `meat3-smufw` | Not yet tested on hardware (register map from fpsflow) |
 
 ## Hidden firmware metrics (`meat3_smu`)
 
@@ -111,6 +112,53 @@ fired since the daemon started (`amdgpuN.smu14.throttle.bit.<reason>`, e.g. `ppt
 `temp_hotspot`) and a time-weighted duty figure per class over the last 60 s
 (`amdgpuN.smu14.throttle.duty.{power,current,thermal,other,any}`, in %). Add the duty rows to the
 Graphs tab while gaming to see which limit is actually holding the clocks back and how often.
+
+## Power-limit scaling (the fpsflow method, inside meat3)
+
+RDNA4 boards use two MPS MP2868A regulators. The firmware's PPT and TDC limits act on the current and
+power the regulators *report*, and those report through gain registers on PMBus page 2. Dividing a gain
+by 1.25 makes the firmware see 1/1.25 of the real figure, so its limit is effectively 1.25x. This is what
+the fpsflow `power_limit_removal` scripts do and what a shunt mod does with solder. meat3 does the same
+writes but keeps the corrected picture:
+
+* controls `amdgpuN.vrm.tbp_scale` and `amdgpuN.vrm.tdc_scale` (1.0 to `amdgpu_vrm.max_tbp_scale` /
+  `max_tdc_scale`, default 1.3, hard cap 1.5) and the action `amdgpuN.vrm.gains_reset`;
+* the stock gains are backed up on the chip in the rdna4p script's own 68-bit CRC format before the
+  first write (an existing script backup is recognised and used as stock), and mirrored in
+  `/var/lib/meat3/vrm_factory.json`;
+* sensors `vrm.real_power_scaled` (regulator input power x TBP scale), `vrm.board_power_corrected`
+  (driver board power x scale) and `vrm.gfx_current_corrected` show the real numbers while the driver's
+  own rows read low by the scale factor;
+* default guards drop both scales to 1.0 when the real power passes 400 W, the hotspot passes 100 °C or
+  any VRM temperature passes 105 °C (edit `guards` in `/etc/meat3/config.json`);
+* meat3d writes the stock gains back when it stops (`amdgpu_vrm.restore_on_stop`); a power cycle also
+  clears them, a warm reboot does not.
+
+Prerequisites, in order:
+
+1. `amdgpu_vrm.allow_writes: true` in `/etc/meat3/config.json` (the switch that also gates VID offsets).
+2. SMU firmware that exposes the VRM bus: PMFW 0x684a00 or older. Newer builds answer at no address, so
+   meat3 shows "VRM controllers: not reachable" with a firmware hint. Fix with `sudo meat3-smufw --pin`
+   (below) and reboot.
+3. Water or a very good air cooler, because the firmware's thermal limits still work but its power
+   limit no longer does, and an 8-pin board. Don't do this on a 12V-2x6 card.
+
+Start at 1.1x, watch `Real power (VR, gain-corrected)` and the hotspot under a real game, and go up in
+0.05 steps. A crash under load is the card telling you the clock or voltage is the limit now, not power.
+
+## `meat3-smufw`: SMU firmware pin
+
+```sh
+sudo meat3-smufw               # running PMFW, installed file, whether it is the known-good build
+sudo meat3-smufw --pin         # download linux-firmware 72a8d254's smu_14_0_3.bin (sha256-checked),
+                               # back up the current file, install, rebuild the initramfs
+sudo meat3-smufw --restore     # back to the distribution file
+```
+
+The blob is AMD-signed and checked by the PSP at load, so nothing is flashed and a bad file is refused,
+not run. What the pin costs is any SMU fix released after June 2025 while it is in place. On Arch-based
+systems a pacman hook re-pins the file after `linux-firmware` upgrades; elsewhere `meat3-smufw` reports
+when a package update has replaced it. Reboot after `--pin` or `--restore`.
 
 ## `meat3-gputune`: undervolt finder
 

@@ -65,11 +65,64 @@ MPS_MFR_VR_CONFIG2, MPS_VOUT_LINEAR = 0x5E, 1 << 11
 # meat3 only READS these (to show and correct the scaling); the writes stay with the scripts.
 MPS_PAGE2 = 2
 MPS_PG, MPS_CG1, MPS_CG1_ALT, MPS_IDROOP_GAIN = 0x0F, 0x08, 0x0C, 0x06
-MPS_BACKUP1, MPS_BACKUP2 = 0x4B, 0x4D
+MPS_BACKUP1, MPS_BACKUP2, MPS_BACKUP3 = 0x4B, 0x4D, 0x10
+MPS_VID, MPS_TRIM = 0x23, 0x22
+I2C_PEC = 0x0708
+# The current fpsflow release (rdna4p) stores a 68-bit backup: 60-bit payload + CRC-8 (poly 0x07 over the
+# payload bits, MSB first), split into two 34-bit blocks (vr1 = high 34 bits, vr2 = low 34) and each block
+# spread over four register fields: p1 = page1 0x4d [15:0], p2 = page1 0x4b [15:11], p3 = page1 0x10 [7:0],
+# p4 = page0 0x4b [15:11]. Payload, MSB first: flag(1) pg1(11) cg1(11) pg2(11) gfx_vid(1) soc_vid(1)
+# vddci_vid(1) vram_vid(1) trim(7) cg1_alt(7) droop(8).
+RDNA4P_FIELDS = [("pg_vr1", 11), ("cg1_vr1", 11), ("pg_vr2", 11), ("gfx_vid", 1), ("soc_vid", 1),
+                 ("vddci_vid", 1), ("vram_vid", 1), ("trim_vr1", 7), ("cg1_alt_vr1", 7), ("droop_vr1", 8)]
+HARD_MAX_SCALE = 1.5          # the control range never exceeds this whatever the config says
 MP2868A_MODEL_BYTE = 0x68
 # AMD's SMU firmware stopped exposing the VR bus on its I2C adapters after PMFW 0x684a00
 # (linux-firmware 2025-06-20 / release 20251111); 0x684b00 (2025-11-19) and later answer at no address.
 SMU14_I2C_LAST_GOOD = 0x684A00
+
+
+def crc8_bits(value: int, nbits: int, poly: int = 0x07) -> int:
+    """CRC-8 over the low `nbits` bits of `value`, MSB first (fpsflow's crc8)."""
+    crc = 0
+    for i in range(nbits - 1, -1, -1):
+        bit = (value >> i) & 1
+        c7 = (crc >> 7) & 1
+        crc = (crc << 1) & 0xFF
+        if bit ^ c7:
+            crc ^= poly
+    return crc
+
+
+def encode_rdna4p_backup(f: dict) -> tuple[int, int]:
+    """Pack stock values into the rdna4p on-chip backup: (block_vr1, block_vr2), 34 bits each."""
+    packed = 1
+    for name, bits in RDNA4P_FIELDS:
+        packed = (packed << bits) | (int(f[name]) & ((1 << bits) - 1))
+    final = (packed << 8) | crc8_bits(packed, 60)
+    return final >> 34 & ((1 << 34) - 1), final & ((1 << 34) - 1)
+
+
+def decode_rdna4p_backup(block_vr1: int, block_vr2: int) -> Optional[dict]:
+    """Stock values from the rdna4p backup, or None when there is no valid (flagged, CRC-correct) backup."""
+    final = ((block_vr1 & ((1 << 34) - 1)) << 34) | (block_vr2 & ((1 << 34) - 1))
+    payload, crc = final >> 8, final & 0xFF
+    if crc8_bits(payload, 60) != crc or not (payload >> 59) & 1:
+        return None
+    out: dict = {}
+    for name, bits in reversed(RDNA4P_FIELDS):
+        out[name] = payload & ((1 << bits) - 1)
+        payload >>= bits
+    return out
+
+
+def split_vr_block(block: int) -> tuple[int, int, int, int]:
+    """34-bit block -> (p1 16 bits, p2 5 bits, p3 8 bits, p4 5 bits) register fields."""
+    return block >> 18 & 0xFFFF, block >> 13 & 0x1F, block >> 5 & 0xFF, block & 0x1F
+
+
+def join_vr_block(p1: int, p2: int, p3: int, p4: int) -> int:
+    return (p1 & 0xFFFF) << 18 | (p2 & 0x1F) << 13 | (p3 & 0xFF) << 5 | (p4 & 0x1F)
 
 
 def decode_rdna4_backup(block_vr1: int, block_vr2: int) -> Optional[dict]:
@@ -110,11 +163,16 @@ class SMBus:
     def __init__(self, bus: int):
         self.fd = os.open(f"/dev/i2c-{bus}", os.O_RDWR)
         self.addr = None
+        self.pec = False
 
-    def _xfer(self, addr: int, rw: int, cmd: int, size: int, data: Optional[_Data] = None) -> _Data:
+    def _xfer(self, addr: int, rw: int, cmd: int, size: int, data: Optional[_Data] = None,
+              pec: bool = False) -> _Data:
         if addr != self.addr:
             fcntl.ioctl(self.fd, I2C_SLAVE, addr)
             self.addr = addr
+        if pec != self.pec:                       # packet error checking, as the fpsflow scripts use (i2cget/set 'wp')
+            fcntl.ioctl(self.fd, I2C_PEC, 1 if pec else 0)
+            self.pec = pec
         d = data or _Data()
         args = _Args(rw, cmd, size, ctypes.pointer(d))
         fcntl.ioctl(self.fd, I2C_SMBUS, args)
@@ -123,8 +181,8 @@ class SMBus:
     def read_byte(self, addr, cmd):
         return self._xfer(addr, SMBUS_READ, cmd, SMBUS_BYTE_DATA).byte
 
-    def read_word(self, addr, cmd):
-        return self._xfer(addr, SMBUS_READ, cmd, SMBUS_WORD_DATA).word
+    def read_word(self, addr, cmd, pec: bool = False):
+        return self._xfer(addr, SMBUS_READ, cmd, SMBUS_WORD_DATA, pec=pec).word
 
     def read_block(self, addr, cmd) -> bytes:
         d = self._xfer(addr, SMBUS_READ, cmd, SMBUS_BLOCK_DATA)
@@ -136,10 +194,10 @@ class SMBus:
         d.byte = val
         self._xfer(addr, SMBUS_WRITE, cmd, SMBUS_BYTE_DATA, d)
 
-    def write_word(self, addr, cmd, val):
+    def write_word(self, addr, cmd, val, pec: bool = False):
         d = _Data()
         d.word = val
-        self._xfer(addr, SMBUS_WRITE, cmd, SMBUS_WORD_DATA, d)
+        self._xfer(addr, SMBUS_WRITE, cmd, SMBUS_WORD_DATA, d, pec=pec)
 
     def close(self):
         try:
@@ -239,6 +297,10 @@ class VrmAccess:
         self.profile_override = cfg.get("profile", "auto")
         self.mps_lsb_mv = cfg.get("mps_offset_lsb_mv")            # None until verified on the card
         self.mps_experimental = bool(cfg.get("experimental_mps_writes", False))
+        self.max_tbp_scale = min(HARD_MAX_SCALE, float(cfg.get("max_tbp_scale", 1.3)))
+        self.max_tdc_scale = min(HARD_MAX_SCALE, float(cfg.get("max_tdc_scale", 1.3)))
+        self.restore_on_stop = bool(cfg.get("restore_on_stop", True))
+        self.gains_touched = False    # meat3 changed the RDNA4 gains in this daemon's lifetime
         self.buses: dict[int, object] = {}
         self.controllers: list[Controller] = []
         self.error: Optional[str] = None
@@ -320,32 +382,70 @@ class VrmAccess:
             pass
 
     # -------------------------------------------------------------- telemetry
-    def rdna4_gains(self) -> Optional[dict]:
-        """RDNA4 (MP2868A) telemetry gains: current page-2 values, the scripts' stock backup when present,
-        and the resulting multipliers (stock / current). Read-only; PAGE is restored to 0."""
+    # ------------------------------------------------------------ RDNA4 (MP2868A) telemetry gains
+    def _rdna4_pair(self):
         c1 = next((c for c in self.controllers if c.mp2868a and c.addr == 0x22), None)
         c2 = next((c for c in self.controllers if c.mp2868a and c.addr == 0x24), None)
+        return c1, c2
+
+    def _rd(self, c: Controller, page: int, cmd: int) -> int:
+        bus = self._bus(c.bus_no)
+        bus.write_byte(c.addr, PAGE, page)
+        try:
+            return bus.read_word(c.addr, cmd, pec=True)
+        finally:
+            bus.write_byte(c.addr, PAGE, 0)
+
+    def _wr(self, c: Controller, page: int, cmd: int, val: int, what: str) -> None:
+        """Write a word with PEC and verify the read-back (raises OSError on mismatch)."""
+        bus = self._bus(c.bus_no)
+        bus.write_byte(c.addr, PAGE, page)
+        try:
+            bus.write_word(c.addr, cmd, val & 0xFFFF, pec=True)
+            back = bus.read_word(c.addr, cmd, pec=True)
+        finally:
+            bus.write_byte(c.addr, PAGE, 0)
+        if back != val & 0xFFFF:
+            raise OSError(0, f"{what}: read back 0x{back:04x}, wrote 0x{val & 0xFFFF:04x} (write-protected?)")
+        self.last = {}
+
+    def _rd_vr_block(self, c: Controller) -> int:
+        p1 = self._rd(c, 1, MPS_BACKUP2)
+        p2 = self._rd(c, 1, MPS_BACKUP1) >> 11 & 0x1F
+        p3 = self._rd(c, 1, MPS_BACKUP3) & 0xFF
+        p4 = self._rd(c, 0, MPS_BACKUP1) >> 11 & 0x1F
+        return join_vr_block(p1, p2, p3, p4)
+
+    def _wr_vr_block(self, c: Controller, block: int) -> None:
+        p1, p2, p3, p4 = split_vr_block(block)
+        self._wr(c, 1, MPS_BACKUP2, p1, "backup2")
+        r = self._rd(c, 1, MPS_BACKUP1) & ~(0x1F << 11)
+        self._wr(c, 1, MPS_BACKUP1, r | p2 << 11, "backup1 p1")
+        r = self._rd(c, 1, MPS_BACKUP3) & ~0xFF
+        self._wr(c, 1, MPS_BACKUP3, r | p3, "backup3")
+        r = self._rd(c, 0, MPS_BACKUP1) & ~(0x1F << 11)
+        self._wr(c, 0, MPS_BACKUP1, r | p4 << 11, "backup1 p0")
+
+    def rdna4_gains(self) -> Optional[dict]:
+        """RDNA4 (MP2868A) telemetry gains: current page-2 values, the stock values from the on-chip backup
+        (rdna4p 68-bit format first, then the older 21-bit one) or from meat3's first-seen record, and the
+        resulting multipliers (stock / current). PAGE is restored to 0."""
+        c1, c2 = self._rdna4_pair()
         if c1 is None:
             return None
         out: dict = {}
         try:
-            bus = self._bus(c1.bus_no)
-            bus.write_byte(c1.addr, PAGE, MPS_PAGE2)
-            out["pg_vr1"] = bus.read_word(c1.addr, MPS_PG) & 0x7FF
-            out["cg1_vr1"] = bus.read_word(c1.addr, MPS_CG1) & 0x7FF
-            out["cg1_alt_vr1"] = bus.read_word(c1.addr, MPS_CG1_ALT) >> 4 & 0x7F
-            out["idroop_raw"] = bus.read_word(c1.addr, MPS_IDROOP_GAIN)
-            bus.write_byte(c1.addr, PAGE, 1)
-            b1 = (bus.read_word(c1.addr, MPS_BACKUP2) << 5) | (bus.read_word(c1.addr, MPS_BACKUP1) >> 11 & 0x1F)
-            bus.write_byte(c1.addr, PAGE, 0)
-            b2 = 0
+            out["pg_vr1_raw"] = self._rd(c1, MPS_PAGE2, MPS_PG)
+            out["cg1_vr1_raw"] = self._rd(c1, MPS_PAGE2, MPS_CG1)
+            out["cg1_alt_vr1_raw"] = self._rd(c1, MPS_PAGE2, MPS_CG1_ALT)
+            out["idroop_raw"] = self._rd(c1, MPS_PAGE2, MPS_IDROOP_GAIN)
+            out["legacy_power_offset"] = bool(self._rd(c1, 1, MPS_BACKUP3) >> 8 & 0xFF)
+            blk1 = self._rd_vr_block(c1)
+            blk2 = 0
             if c2 is not None:
-                bus2 = self._bus(c2.bus_no)
-                bus2.write_byte(c2.addr, PAGE, MPS_PAGE2)
-                out["pg_vr2"] = bus2.read_word(c2.addr, MPS_PG) & 0x7FF
-                bus2.write_byte(c2.addr, PAGE, 1)
-                b2 = (bus2.read_word(c2.addr, MPS_BACKUP2) << 5) | (bus2.read_word(c2.addr, MPS_BACKUP1) >> 11 & 0x1F)
-                bus2.write_byte(c2.addr, PAGE, 0)
+                out["pg_vr2_raw"] = self._rd(c2, MPS_PAGE2, MPS_PG)
+                out["legacy_power_offset"] |= bool(self._rd(c2, 1, MPS_BACKUP3) >> 8 & 0xFF)
+                blk2 = self._rd_vr_block(c2)
         except OSError as e:
             for c in (c1, c2):
                 if c is not None:
@@ -355,21 +455,127 @@ class VrmAccess:
                         pass
             out["error"] = e.strerror or str(e)
             return out
-        stock = decode_rdna4_backup(b1, b2)
+        out["pg_vr1"] = out["pg_vr1_raw"] & 0x7FF
+        out["cg1_vr1"] = out["cg1_vr1_raw"] & 0x7FF
+        out["cg1_alt_vr1"] = out["cg1_alt_vr1_raw"] >> 4 & 0x7F
+        if "pg_vr2_raw" in out:
+            out["pg_vr2"] = out["pg_vr2_raw"] & 0x7FF
+        stock = decode_rdna4p_backup(blk1, blk2)
+        src = "scripts backup (rdna4p)"
+        if stock is None:
+            # older scripts: 21-bit blocks in page-1 0x4d/0x4b only
+            old1 = (blk1 >> 18 & 0xFFFF) << 5 | (blk1 >> 13 & 0x1F)
+            old2 = (blk2 >> 18 & 0xFFFF) << 5 | (blk2 >> 13 & 0x1F)
+            stock = decode_rdna4_backup(old1, old2)
+            src = "scripts backup (legacy)"
         out["stock"] = stock
-        # Without a scripts backup, the first values meat3 sees are taken as stock (saved per card).
         if stock is None:
             stock = {k: self._factory(c1, MPS_PAGE2, "/" + k, out[k]) for k in ("pg_vr1", "cg1_vr1", "cg1_alt_vr1")}
             if "pg_vr2" in out:
                 stock["pg_vr2"] = self._factory(c2, MPS_PAGE2, "/pg_vr2", out["pg_vr2"])
-            out["stock_source"] = "meat3 first-seen"
+            src = "meat3 first-seen"
         else:
-            out["stock_source"] = "scripts backup"
-        div = lambda s, cur: (s / cur) if s and cur else None
+            for k in ("pg_vr1", "cg1_vr1", "cg1_alt_vr1", "pg_vr2"):
+                if k in stock:                      # keep meat3's copy in step with the chip's backup
+                    self.factory[self._key(c1 if k != "pg_vr2" else c2, MPS_PAGE2) + "/" + k] = stock[k]
+            self._save_factory()
+        out["stock_source"] = src
+        out["stock_values"] = {k: stock.get(k) for k in ("pg_vr1", "cg1_vr1", "cg1_alt_vr1", "pg_vr2")}
+        div = lambda s_, cur: (s_ / cur) if s_ and cur else None
         out["tbp_scale"] = div(stock.get("pg_vr1"), out["pg_vr1"])
         out["tdc_scale"] = div(stock.get("cg1_vr1"), out["cg1_vr1"])
         out["tdc_alt_scale"] = div(stock.get("cg1_alt_vr1"), out["cg1_alt_vr1"])
         return out
+
+    def can_scale(self) -> tuple[bool, str]:
+        if not self.allow_writes:
+            return False, "VRM writes are disabled (set amdgpu_vrm.allow_writes in /etc/meat3/config.json)"
+        c1, c2 = self._rdna4_pair()
+        if c1 is None or c2 is None:
+            return False, "no MP2868A pair (0x22 + 0x24) on the SMU bus"
+        return True, ""
+
+    def _ensure_rdna4_backup(self, c1: Controller, c2: Controller, g: dict) -> dict:
+        """Make sure the chip carries a valid rdna4p backup of the stock values; returns the stock dict."""
+        if g.get("stock") is not None and g.get("stock_source", "").endswith("(rdna4p)"):
+            return g["stock"]
+        st = g["stock_values"]
+        if any(st.get(k) is None for k in ("pg_vr1", "cg1_vr1", "cg1_alt_vr1", "pg_vr2")):
+            raise OSError(0, "stock gains unknown; cannot create a backup")
+        fields = dict(st)
+        fields["gfx_vid"] = self._rd(c1, 0, MPS_VID) & 1
+        fields["soc_vid"] = self._rd(c2, 0, MPS_VID) & 1
+        fields["vddci_vid"] = self._rd(c1, 1, MPS_VID) & 1
+        fields["vram_vid"] = self._rd(c2, 1, MPS_VID) & 1
+        fields["trim_vr1"] = self._rd(c1, 0, MPS_TRIM) & 0x7F
+        fields["droop_vr1"] = g["idroop_raw"] & 0xFF
+        b1, b2 = encode_rdna4p_backup(fields)
+        self._wr_vr_block(c1, b1)
+        self._wr_vr_block(c2, b2)
+        if decode_rdna4p_backup(self._rd_vr_block(c1), self._rd_vr_block(c2)) is None:
+            raise OSError(0, "backup read-back failed CRC check")
+        return fields
+
+    def set_rdna4_scale(self, kind: str, k: float) -> tuple[bool, str]:
+        """kind 'tbp': PG on both controllers = stock / k (firmware power limit becomes PPT x k).
+        kind 'tdc': CG1 and CG1_alt on the GFX controller = stock / k (TDC limit becomes 330 A x k).
+        The gains are telemetry scalers: the SMU and the driver then see real / k."""
+        ok, why = self.can_scale()
+        if not ok:
+            return False, why
+        cap = self.max_tbp_scale if kind == "tbp" else self.max_tdc_scale
+        if kind not in ("tbp", "tdc"):
+            return False, f"unknown scale {kind!r}"
+        if not 1.0 <= float(k) <= cap:
+            return False, f"scale must be 1.0..{cap:g} (amdgpu_vrm.max_{kind}_scale, hard cap {HARD_MAX_SCALE:g})"
+        c1, c2 = self._rdna4_pair()
+        g = self.rdna4_gains()
+        if not g or "error" in g:
+            return False, f"cannot read gains: {(g or {}).get('error', 'no controller')}"
+        if g.get("legacy_power_offset"):
+            return False, ("an older fpsflow script left a power offset in page-1 register 0x10; remove it with "
+                           "that script and power-cycle before scaling")
+        try:
+            stock = self._ensure_rdna4_backup(c1, c2, g)
+            writes = []
+            if kind == "tbp":
+                for c, key, raw in ((c1, "pg_vr1", g["pg_vr1_raw"]), (c2, "pg_vr2", g["pg_vr2_raw"])):
+                    val = (raw & ~0x7FF) | min(0x7FF, int(stock[key] / k))
+                    self._wr(c, MPS_PAGE2, MPS_PG, val, f"PG 0x{c.addr:02x}")
+                    writes.append(f"PG 0x{c.addr:02x}=0x{val & 0x7FF:03x}")
+            else:
+                val = (g["cg1_vr1_raw"] & ~0x7FF) | min(0x7FF, int(stock["cg1_vr1"] / k))
+                self._wr(c1, MPS_PAGE2, MPS_CG1, val, "CG1")
+                writes.append(f"CG1=0x{val & 0x7FF:03x}")
+                alt = (g["cg1_alt_vr1_raw"] & ~0x7F0) | (min(0x7F, int(stock["cg1_alt_vr1"] / k)) << 4)
+                self._wr(c1, MPS_PAGE2, MPS_CG1_ALT, alt, "CG1 alt")
+                writes.append(f"CG1alt=0x{alt >> 4 & 0x7F:02x}")
+        except OSError as e:
+            return False, f"I2C error: {e.strerror or e}"
+        self.gains_touched = True
+        self.last = {}
+        return True, f"{kind.upper()} telemetry scale x{k:.2f} (stock/{k:.2f}): " + ", ".join(writes) + " (read back OK)"
+
+    def reset_rdna4_gains(self) -> tuple[bool, str]:
+        ok, why = self.can_scale()
+        if not ok:
+            return False, why
+        c1, c2 = self._rdna4_pair()
+        g = self.rdna4_gains()
+        if not g or "error" in g:
+            return False, f"cannot read gains: {(g or {}).get('error', 'no controller')}"
+        st = g["stock_values"]
+        try:
+            self._wr(c1, MPS_PAGE2, MPS_PG, (g["pg_vr1_raw"] & ~0x7FF) | st["pg_vr1"], "PG vr1")
+            self._wr(c1, MPS_PAGE2, MPS_CG1, (g["cg1_vr1_raw"] & ~0x7FF) | st["cg1_vr1"], "CG1")
+            self._wr(c1, MPS_PAGE2, MPS_CG1_ALT, (g["cg1_alt_vr1_raw"] & ~0x7F0) | st["cg1_alt_vr1"] << 4, "CG1 alt")
+            if "pg_vr2_raw" in g and st.get("pg_vr2") is not None:
+                self._wr(c2, MPS_PAGE2, MPS_PG, (g["pg_vr2_raw"] & ~0x7FF) | st["pg_vr2"], "PG vr2")
+        except OSError as e:
+            return False, f"I2C error: {e.strerror or e}"
+        self.gains_touched = False
+        self.last = {}
+        return True, f"TBP/TDC telemetry gains back to stock ({g['stock_source']})"
 
     def read_all(self, min_interval: float = 2.0) -> dict:
         """{(addr, page): {...}} cached for min_interval seconds (each read is an SMU I2C transfer)."""
@@ -558,5 +764,10 @@ class VrmAccess:
         return True, f"0x{c.addr:02x}/p{page} {what} (read back OK)"
 
     def close(self):
+        if self.gains_touched and self.restore_on_stop:
+            try:
+                self.reset_rdna4_gains()        # never leave scaled gains behind when meat3d stops
+            except Exception:
+                pass
         for b in self.buses.values():
             b.close()

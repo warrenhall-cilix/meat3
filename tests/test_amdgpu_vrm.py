@@ -84,7 +84,7 @@ class FakeBus:
         c = self._c(addr)
         return {V.PMBUS_REVISION: 0x33, V.VOUT_MODE: c.mode, V.PAGE: c.page}[cmd]
 
-    def read_word(self, addr, cmd):
+    def read_word(self, addr, cmd, pec=False):
         return self._c(addr).read(cmd)
 
     def read_block(self, addr, cmd):
@@ -96,7 +96,7 @@ class FakeBus:
         assert cmd == V.PAGE
         c.page = val
 
-    def write_word(self, addr, cmd, val):
+    def write_word(self, addr, cmd, val, pec=False):
         c = self._c(addr)
         c.writes.append((c.page, cmd, val))
         c.regs[c.page][cmd] = val
@@ -320,6 +320,8 @@ class TestVrm(Base):
             c.real.setdefault(1, (1.0, 100))
             c.regs[1][V.MPS_BACKUP2] = block >> 5 & 0xFFFF
             c.regs[1][V.MPS_BACKUP1] = (block & 0x1F) << 11
+            c.regs[1][V.MPS_BACKUP3] = 0
+            c.regs[0][V.MPS_BACKUP1] = 0
             c.regs[2] = {V.MPS_PG: 0x8000 | pg, V.MPS_CG1: cg1, V.MPS_CG1_ALT: cg1a << 4 | 0x3, V.MPS_IDROOP_GAIN: 0x1234}
             c.real[2] = (1.0, 100)
             return c
@@ -329,7 +331,7 @@ class TestVrm(Base):
         v = self.vrm()
         self.assertTrue(all(c.mp2868a for c in v.controllers))
         g = v.rdna4_gains()
-        self.assertEqual(g["stock_source"], "scripts backup")
+        self.assertEqual(g["stock_source"], "scripts backup (legacy)")
         self.assertAlmostEqual(g["tbp_scale"], 1.25, places=3)
         self.assertAlmostEqual(g["tdc_scale"], 1.2, places=3)
         self.assertAlmostEqual(g["tdc_alt_scale"], 1.0, places=3)
@@ -342,6 +344,158 @@ class TestVrm(Base):
         self.assertAlmostEqual(ss["amdgpu0.vrm.tbp_scale"].value, 1.25, places=3)
         self.assertAlmostEqual(ss["amdgpu0.vrm.tdc_scale"].value, 1.2, places=3)
         self.assertIn("amdgpu0.vrm.real_power_scaled", ss)
+
+    # ---------------------------------------------------------------- RDNA4 scaling (fpsflow in meat3)
+    STOCK = {"pg_vr1": 0x400, "cg1_vr1": 0x300, "pg_vr2": 0x380, "cg1_alt_vr1": 0x40}
+
+    def mp2868a_pair(self, scaled=False, legacy_offset=False, backup=None):
+        """Two MP2868A-like controllers with page-2 gains at stock (or at /1.25 and /1.2 when scaled)."""
+        def mk(pages, pg, cg1, cg1a):
+            c = FakeMps(pages, vout=1.0, iout=100)
+            c.regs[0][V.MFR_MODEL] = 0x6868
+            c.regs.setdefault(1, {})
+            c.real.setdefault(1, (1.0, 100))
+            c.regs[0][V.MPS_BACKUP1] = 0x0123                       # low 11 bits are "something else": must survive
+            c.regs[1][V.MPS_BACKUP1] = 0x0456
+            c.regs[1][V.MPS_BACKUP2] = 0
+            c.regs[1][V.MPS_BACKUP3] = 0x0100 if legacy_offset else 0
+            c.regs[0][V.MPS_VID] = 0x0001
+            c.regs[1][V.MPS_VID] = 0x0000
+            c.regs[0][V.MPS_TRIM] = 0x0012
+            c.regs[2] = {V.MPS_PG: 0x8000 | pg, V.MPS_CG1: 0x4000 | cg1, V.MPS_CG1_ALT: cg1a << 4 | 0x3,
+                         V.MPS_IDROOP_GAIN: 0x1234}
+            c.real[2] = (1.0, 100)
+            return c
+        st = self.STOCK
+        c1 = mk([0], st["pg_vr1"] * 4 // 5 if scaled else st["pg_vr1"], st["cg1_vr1"] * 5 // 6 if scaled else st["cg1_vr1"],
+                st["cg1_alt_vr1"])
+        c2 = mk([0, 1], st["pg_vr2"], 0, 0)
+        if backup:
+            b1, b2 = backup
+            for c, b in ((c1, b1), (c2, b2)):
+                p1, p2, p3, p4 = V.split_vr_block(b)
+                c.regs[1][V.MPS_BACKUP2] = p1
+                c.regs[1][V.MPS_BACKUP1] = c.regs[1][V.MPS_BACKUP1] & 0x7FF | p2 << 11
+                c.regs[1][V.MPS_BACKUP3] = c.regs[1][V.MPS_BACKUP3] & 0xFF00 | p3
+                c.regs[0][V.MPS_BACKUP1] = c.regs[0][V.MPS_BACKUP1] & 0x7FF | p4 << 11
+        self.ctls = {0x22: c1, 0x24: c2}
+        return c1, c2
+
+    def test_rdna4p_backup_codec(self):
+        f = dict(self.STOCK, gfx_vid=1, soc_vid=0, vddci_vid=1, vram_vid=0, trim_vr1=0x12, droop_vr1=0x34)
+        b1, b2 = V.encode_rdna4p_backup(f)
+        self.assertLess(max(b1, b2), 1 << 34)
+        self.assertEqual(V.decode_rdna4p_backup(b1, b2), f)
+        self.assertIsNone(V.decode_rdna4p_backup(b1 ^ 1 << 20, b2))                 # CRC catches a flipped bit
+        self.assertIsNone(V.decode_rdna4p_backup(0, 0))                             # empty: not a backup
+        self.assertEqual(V.join_vr_block(*V.split_vr_block(b1)), b1)
+        # the script's own crc8: poly 0x07, MSB first
+        self.assertEqual(V.crc8_bits(0x01, 8), 0x07)
+        self.assertEqual(V.crc8_bits(0x00, 60), 0)
+
+    def test_scale_writes_backup_then_gains_and_corrects_sensors(self):
+        c1, c2 = self.mp2868a_pair()
+        v = self.vrm(allow_writes=True)
+        g = v.rdna4_gains()
+        self.assertEqual(g["stock_source"], "meat3 first-seen")
+        self.assertFalse(g["legacy_power_offset"])
+        ok, msg = v.set_rdna4_scale("tbp", 1.25)
+        self.assertTrue(ok, msg)
+        # backup now on the chip, in the rdna4p format, with the untouched bits preserved
+        blk1 = V.join_vr_block(c1.regs[1][V.MPS_BACKUP2], c1.regs[1][V.MPS_BACKUP1] >> 11, c1.regs[1][V.MPS_BACKUP3] & 0xFF,
+                               c1.regs[0][V.MPS_BACKUP1] >> 11)
+        blk2 = V.join_vr_block(c2.regs[1][V.MPS_BACKUP2], c2.regs[1][V.MPS_BACKUP1] >> 11, c2.regs[1][V.MPS_BACKUP3] & 0xFF,
+                               c2.regs[0][V.MPS_BACKUP1] >> 11)
+        bk = V.decode_rdna4p_backup(blk1, blk2)
+        self.assertEqual({k: bk[k] for k in self.STOCK}, self.STOCK)
+        self.assertEqual((bk["gfx_vid"], bk["trim_vr1"], bk["droop_vr1"]), (1, 0x12, 0x34))
+        self.assertEqual(c1.regs[0][V.MPS_BACKUP1] & 0x7FF, 0x0123)
+        self.assertEqual(c1.regs[1][V.MPS_BACKUP1] & 0x7FF, 0x0456)
+        # gains: PG = stock / 1.25 on both controllers, upper bits kept
+        self.assertEqual(c1.regs[2][V.MPS_PG], 0x8000 | int(0x400 / 1.25))
+        self.assertEqual(c2.regs[2][V.MPS_PG], 0x8000 | int(0x380 / 1.25))
+        self.assertEqual(c1.regs[2][V.MPS_CG1], 0x4000 | 0x300)                   # TDC untouched
+        self.assertEqual(c1.page, 0)
+        g = v.rdna4_gains()
+        self.assertEqual(g["stock_source"], "scripts backup (rdna4p)")
+        self.assertAlmostEqual(g["tbp_scale"], 1.25, places=2)
+        ok, msg = v.set_rdna4_scale("tdc", 1.2)
+        self.assertTrue(ok, msg)
+        self.assertEqual(c1.regs[2][V.MPS_CG1], 0x4000 | int(0x300 / 1.2))
+        self.assertEqual(c1.regs[2][V.MPS_CG1_ALT], int(0x40 / 1.2) << 4 | 0x3)
+        g = v.rdna4_gains()
+        self.assertAlmostEqual(g["tdc_scale"], 1.2, places=2)
+        self.assertAlmostEqual(g["tdc_alt_scale"], 1.2, places=1)
+        self.assertTrue(v.gains_touched)
+        # caps
+        self.assertFalse(v.set_rdna4_scale("tbp", 1.4)[0])                        # default cap 1.3
+        self.assertFalse(v.set_rdna4_scale("tbp", 0.9)[0])
+        v2 = self.vrm(allow_writes=True, max_tbp_scale=9)
+        self.assertFalse(v2.set_rdna4_scale("tbp", 1.6)[0])                       # hard cap 1.5
+        # reset and restore-on-close
+        ok, msg = v.reset_rdna4_gains()
+        self.assertTrue(ok, msg)
+        self.assertEqual(c1.regs[2][V.MPS_PG], 0x8000 | 0x400)
+        self.assertEqual(c2.regs[2][V.MPS_PG], 0x8000 | 0x380)
+        self.assertEqual(c1.regs[2][V.MPS_CG1_ALT], 0x40 << 4 | 0x3)
+        self.assertFalse(v.gains_touched)
+        v.set_rdna4_scale("tbp", 1.1)
+        v.close()
+        self.assertEqual(c1.regs[2][V.MPS_PG], 0x8000 | 0x400)                     # stock again on daemon stop
+
+    def test_scale_refusals(self):
+        self.mp2868a_pair()
+        v = self.vrm()                                                             # writes disabled
+        ok, why = v.set_rdna4_scale("tbp", 1.2)
+        self.assertFalse(ok); self.assertIn("allow_writes", why)
+        self.mp2868a_pair(legacy_offset=True)
+        v = self.vrm(allow_writes=True)
+        ok, why = v.set_rdna4_scale("tbp", 1.2)
+        self.assertFalse(ok); self.assertIn("older fpsflow", why)
+        self.assertEqual(self.ctls[0x22].regs[2][V.MPS_PG], 0x8000 | 0x400)         # nothing written
+
+    def test_existing_script_backup_is_used_as_stock(self):
+        f = dict(self.STOCK, gfx_vid=1, soc_vid=0, vddci_vid=0, vram_vid=0, trim_vr1=0x12, droop_vr1=0x34)
+        c1, c2 = self.mp2868a_pair(scaled=True, backup=V.encode_rdna4p_backup(f))
+        v = self.vrm(allow_writes=True)
+        g = v.rdna4_gains()
+        self.assertEqual(g["stock_source"], "scripts backup (rdna4p)")
+        self.assertAlmostEqual(g["tbp_scale"], 1.25, places=2)
+        self.assertAlmostEqual(g["tdc_scale"], 1.2, places=2)
+        before = dict(c1.regs[1])
+        ok, msg = v.set_rdna4_scale("tbp", 1.1)                                    # must not rewrite the backup
+        self.assertTrue(ok, msg)
+        self.assertEqual(c1.regs[1], before)
+        self.assertEqual(c1.regs[2][V.MPS_PG], 0x8000 | int(0x400 / 1.1))
+
+    def test_backend_scale_controls_and_sensors(self):
+        self.mp2868a_pair()
+        import json
+        with open(os.path.join(self.tmp, "fac.json"), "w") as fh:
+            json.dump({}, fh)
+        be = A.AmdGpuBackend.detect(self.root)[0]
+        be.vrm_opener = self.opener
+        from meat3.core import config as C
+        old = C.get
+        C.get = lambda: dict(old(), amdgpu_vrm={"enabled": True, "allow_writes": True})
+        try:
+            ss = {s.id: s for s in be.sensors()}
+            cs = {c.id: c for c in be.controls()}
+            self.assertIn("amdgpu0.vrm.board_power_corrected", ss)
+            tb, td = cs["amdgpu0.vrm.tbp_scale"], cs["amdgpu0.vrm.tdc_scale"]
+            self.assertTrue(tb.available and td.available and cs["amdgpu0.vrm.gains_reset"].available)
+            self.assertEqual((tb.min, tb.max, tb.danger), (1.0, 1.3, 2))
+            ok, msg = be.apply("amdgpu0.vrm.tbp_scale", 1.2)
+            self.assertTrue(ok, msg)
+            self.assertEqual(self.ctls[0x22].regs[2][V.MPS_PG], 0x8000 | int(0x400 / 1.2))
+            self.assertFalse(be.apply("amdgpu0.vrm.tbp_scale", "x")[0])
+            ok, msg = be.apply("amdgpu0.vrm.gains_reset", None)
+            self.assertTrue(ok, msg)
+            self.assertEqual(self.ctls[0x22].regs[2][V.MPS_PG], 0x8000 | 0x400)
+            ss = {s.id: s for s in be.sensors()}
+            self.assertAlmostEqual(ss["amdgpu0.vrm.tbp_scale"].value, 1.0, places=2)
+        finally:
+            C.get = old
 
 
 if __name__ == "__main__":

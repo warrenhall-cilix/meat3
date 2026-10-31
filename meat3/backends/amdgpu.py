@@ -1057,6 +1057,17 @@ class AmdGpuBackend(Backend):
                                   pw["real_w"] * tbp, "W", 0,
                                   f"regulator input power x TBP scale {tbp:.3f}: what the card really draws while "
                                   "the firmware and driver see 1/scale of it"))
+            if tbp:
+                out.append(Sensor(f"{P}.vrm.board_power_corrected", G, "Board power (gain-corrected)",
+                                  None if board is None else board * tbp, "W", 0,
+                                  f"driver board power x TBP scale {tbp:.3f}; equals the driver value at x1.0. "
+                                  "Guard on this (or on the VR real power) when scaling the limits."))
+                tdc = g.get("tdc_scale")
+                cur = next((self._seen_rows.get(k, {}).get("value") for k in ("average_gfx_current", "fm.AvgCurrent_gfx")
+                            if self._seen_rows.get(k, {}).get("value") is not None), None)
+                if tdc and cur is not None:
+                    out.append(Sensor(f"{P}.vrm.gfx_current_corrected", G, "GFX current (gain-corrected)",
+                                      cur * tdc, "A", 0, f"firmware GFX current x TDC scale {tdc:.3f}"))
         for (addr, page), r in sorted(data.items()):
             key, label = vrmm.RAILS[(addr, page)]
             h = f"PMBus 0x{addr:02x} page {page}"
@@ -1143,12 +1154,54 @@ class AmdGpuBackend(Backend):
                                danger=1, available=v.allow_writes,
                                hint="writes back the offset, current-sense gain and load line found first" if
                                v.allow_writes else "VRM writes are disabled (amdgpu_vrm.allow_writes)"))
+        out += self._rdna4_scale_controls()
+        return out
+
+    def _rdna4_scale_controls(self) -> list[Control]:
+        """TBP / TDC telemetry scaling on RDNA4 (the fpsflow 'power limit removal' in meat3, with the
+        corrected sensors and guards that go with it)."""
+        v = self.vrm
+        g = v.rdna4_gains() if v and v.controllers else None
+        if not g:
+            return []
+        P, G = self.prefix, f"{self.name}/VRM power limit scaling (RDNA4)"
+        ok, why = v.can_scale()
+        if ok and "error" in g:
+            ok, why = False, f"gain registers unreadable: {g['error']}"
+        if ok and g.get("legacy_power_offset"):
+            ok, why = False, "older fpsflow power offset present in page-1 0x10: remove it with that script and power-cycle"
+        warn = ("DANGEROUS: rewrites the MP2868A telemetry gain the firmware's limits act on, so the limit "
+                "becomes stock x scale and the driver's power/current readings become real / scale. meat3 "
+                "shows the corrected values ('Real power (VR, gain-corrected)', 'Board power (gain-corrected)') "
+                "and the default guards drop the scale to 1.0 on real power, hotspot or VRM temperature. Stock "
+                "values are backed up on the chip in the fpsflow format before the first write. Survives a "
+                "reboot (not a power cycle); meat3d restores stock when it stops.")
+        src = g.get("stock_source", "")
+        out = [Control(f"{P}.vrm.tbp_scale", G, "Board power (TBP) limit scale", "float",
+                       None if g.get("tbp_scale") is None else round(g["tbp_scale"], 2),
+                       min=1.0, max=v.max_tbp_scale, step=0.05, unit="x", default=1.0, danger=2, available=ok,
+                       hint=(why + ". " if why else "") + f"PPT limit x scale (power gain PG on both controllers; "
+                       f"stock from {src}). " + warn),
+               Control(f"{P}.vrm.tdc_scale", G, "GFX current (TDC) limit scale", "float",
+                       None if g.get("tdc_scale") is None else round(g["tdc_scale"], 2),
+                       min=1.0, max=v.max_tdc_scale, step=0.05, unit="x", default=1.0, danger=2, available=ok,
+                       hint=(why + ". " if why else "") + f"TDC limit x scale (current gains CG1 and CG1 alt on the "
+                       f"GFX controller; stock from {src}). " + warn),
+               Control(f"{P}.vrm.gains_reset", G, "Restore stock TBP/TDC gains", "action", danger=1,
+                       available=bool(ok), hint=why or "writes the backed-up stock gains back to both controllers")]
         return out
 
     def _vrm_apply(self, control_id: str, value: Any) -> tuple[bool, str]:
         v = self.vrm
         if v is None:
             return False, "VRM access unavailable"
+        tail = control_id.split(".", 2)[2]
+        if tail in ("tbp_scale", "tdc_scale"):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return False, "expected a number"
+            return v.set_rdna4_scale(tail[:3], float(value))
+        if tail == "gains_reset":
+            return v.reset_rdna4_gains()
         _, _, key, what = control_id.split(".", 3)
         rail = next(((a, p) for (a, p), (k, _l) in vrmm.RAILS.items() if k == key), None)
         if rail is None:
@@ -1169,6 +1222,13 @@ class AmdGpuBackend(Backend):
 
     def _write(self, path: str, data: str) -> None:
         self.io.write(path, data)
+
+    def close(self) -> None:
+        if self.vrm is not None:
+            try:
+                self.vrm.close()          # restores stock TBP/TDC gains if meat3 changed them
+            except Exception:
+                pass
 
     def apply(self, control_id: str, value: Any) -> tuple[bool, str]:
         if control_id.startswith(f"{self.prefix}.vrm."):

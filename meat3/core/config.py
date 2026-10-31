@@ -44,7 +44,10 @@ DEFAULTS = {
     # Telemetry is read-only. Voltage offset writes are off unless allow_writes is true, and are
     # clamped to +-max_offset_mv. max_current_scale caps the current-reporting scale (raises the
     # firmware current limit). All VRM settings are volatile: a power cycle restores the factory values.
-    "amdgpu_vrm": {"enabled": True, "allow_writes": False, "max_offset_mv": 50, "max_current_scale": 1.5},
+    # RDNA4 TBP/TDC telemetry scaling caps (hard cap 1.5 in code); restore_on_stop puts the stock gains
+    # back whenever meat3d stops. Writes need allow_writes.
+    "amdgpu_vrm": {"enabled": True, "allow_writes": False, "max_offset_mv": 50, "max_current_scale": 1.5,
+                   "max_tbp_scale": 1.3, "max_tdc_scale": 1.3, "restore_on_stop": True},
     # AMD Ryzen SMU overclocking (Curve Optimizer, PBO PPT/TDC/EDC) via ryzen_smu.
     # Validated on Granite Ridge (9800X3D): CO all/per-core write+readback+stress, PPT write+readback.
     "amd_smu_controls": True,
@@ -68,6 +71,13 @@ DEFAULTS = {
          "control": "cpu*.smu.oc_mode", "value": 0, "enabled": True},
         {"name": "AMD GPU hotspot (junction) overtemp", "sensor": "amdgpu*.hwmon.temp2", "above": 105, "count": 3,
          "control": "amdgpu*.oc.power_cap", "value": "min", "enabled": True},
+        # RDNA4 TBP/TDC scaling: the firmware limits are blind while scaled, so trip on the real figures
+        {"name": "AMD GPU real power (scaled limits)", "sensor": "amdgpu*.vrm.real_power_scaled", "above": 400,
+         "count": 3, "control": "amdgpu*.vrm.t[bd][pc]_scale", "value": 1.0, "enabled": True},
+        {"name": "AMD GPU hotspot (scaled limits)", "sensor": "amdgpu*.hwmon.temp2", "above": 100, "count": 3,
+         "control": "amdgpu*.vrm.t[bd][pc]_scale", "value": 1.0, "enabled": True},
+        {"name": "AMD GPU VRM overtemp (scaled limits)", "sensor": "amdgpu*.vrm.*.temp", "above": 105, "count": 3,
+         "control": "amdgpu*.vrm.t[bd][pc]_scale", "value": 1.0, "enabled": True},
         # for RDNA4 cards with the board-power shunts bypassed: the power cap no longer bites, so cut
         # the GPU clock instead. Set "above" to the real power you allow, then enable it.
         {"name": "AMD real power (VRM) over limit", "sensor": "amdgpu*.vrm.real_power", "above": 450, "count": 3,
