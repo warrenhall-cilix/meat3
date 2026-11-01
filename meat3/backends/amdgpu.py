@@ -1313,7 +1313,6 @@ class AmdGpuBackend(Backend):
                 self._unpin_clock(os.path.join(self.dev, "power_dpm_force_performance_level"))
             except Exception:
                 pass
-    def close(self) -> None:
         if self.vrm is not None:
             try:
                 self.vrm.close()          # restores stock TBP/TDC gains if meat3 changed them
