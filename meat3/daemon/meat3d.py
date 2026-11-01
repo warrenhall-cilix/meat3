@@ -27,6 +27,7 @@ import traceback
 from .. import backends as backends_pkg
 from ..core import config, fmt
 from ..core.updater import Updater
+from ..core import experimental
 from ..osd.mangohud import parse_hotkey
 from ..core.model import Backend
 
@@ -203,6 +204,16 @@ class State:
         self.refresh_controls()
         return (True, "; ".join(msgs)) if msgs else (False, "that trip changed nothing that can be restored")
 
+    def reload_config(self):
+        """config changed on disk through the Experimental tab: tell the backends and refresh the controls."""
+        cfg = config.get()
+        for b in self.backends:
+            try:
+                b.reload_config(cfg)
+            except Exception as e:
+                print(f"meat3d: {b.name}.reload_config failed: {e}")
+        self.refresh_controls()
+
     def refresh_controls(self):
         ctls, owner = [], {}
         for b in self.backends:
@@ -306,6 +317,7 @@ UPDATE_EVERY = 6 * 3600       # re-check GitHub at most this often when a client
 class Handler(socketserver.StreamRequestHandler):
     state: State = None
     updater: Updater = Updater()
+    smufw: experimental.SmufwRunner = experimental.SmufwRunner()
 
     def handle(self):
         can_write = peer_can_write(self.request)
@@ -349,8 +361,31 @@ class Handler(socketserver.StreamRequestHandler):
             if not up.checking and time.time() - up.state["checked"] > UPDATE_EVERY:
                 up.check()
             return {"ok": True, **up.status(), "can_update": up.may_start(getattr(self, "uid", -1))}
+        if cmd == "experimental_get":
+            try:
+                fw = experimental.smufw_state()
+            except Exception as e:
+                fw = {"devices": [], "hook": False, "error": str(e)}
+            return {"ok": True, **experimental.effective(), "smufw": fw, "smufw_run": self.smufw.status(),
+                    "can_write": can_write}
         if not can_write:
             return {"ok": False, "msg": f"permission denied (join group '{WRITE_GROUP}')"}
+        if cmd == "experimental_set":
+            try:
+                experimental.apply(req.get("settings") or {}, req.get("guards") or {},
+                                   bool(req.get("reset_guards", False)))
+            except (ValueError, OSError) as e:
+                return {"ok": False, "msg": str(e)}
+            st.reload_config()
+            print(f"meat3d: experimental_set {req.get('settings')} guards={req.get('guards')} "
+                  f"reset_guards={bool(req.get('reset_guards', False))}")
+            return {"ok": True, **experimental.effective()}
+        if cmd == "smufw_run":
+            if not (config.get().get("experimental") or {}).get("accepted"):
+                return {"ok": False, "msg": "accept the experimental-features notice first"}
+            ok, msg = self.smufw.start(str(req.get("action", "")))
+            print(f"meat3d: smufw_run {req.get('action')} -> {ok} {msg}")
+            return {"ok": ok, "msg": msg}
         if cmd == "update_check":
             self.updater.check()
             return {"ok": True}

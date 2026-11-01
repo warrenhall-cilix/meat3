@@ -582,6 +582,46 @@ def _exercise(app, w, tmp, sock, osd_file, mock):
     _wait(app, lambda: "failed" in dlg.head.text().lower(), 5, "mock refuses update")
     dlg.close()
 
+    # --- Experimental tab: notice gate, settings round-trip through mockd, firmware pin run with its log
+    x = w.experimental
+    w.tabs.setCurrentIndex(w.tabs.indexOf(x))
+    _wait(app, lambda: x.stack.currentIndex() == 0, 5, "experimental notice shown first")
+    assert not x.btn_enable.isEnabled()
+    x.chk_understand.setChecked(True)
+    assert x.btn_enable.isEnabled()
+    x.btn_enable.click()
+    _wait(app, lambda: x.stack.currentIndex() == 1, 5, "experimental page unlocked")
+    _wait(app, lambda: x.guards.rowCount() >= 9, 5, "guard table filled")
+    _pump(app, 0.3)
+    w.grab().save(str(SHOTS / "experimental-dark.png"))
+    x.spin_tbp.setValue(1.5)
+    x.chk_allow.setChecked(True)
+    x.btn_limits_apply.click()
+    _wait(app, lambda: "limits saved" in x.msg.text(), 5, "limits saved")
+    x.btn_vrm_apply.click()
+    _wait(app, lambda: "regulator settings saved" in x.msg.text(), 5, "vrm settings saved")
+    got = {}
+    w.link.request({"cmd": "experimental_get"}, lambda r: got.setdefault("r", r))
+    _wait(app, lambda: "r" in got, 5, "experimental_get")
+    assert got["r"]["amdgpu_vrm"]["max_tbp_scale"] == 1.5 and got["r"]["amdgpu_vrm"]["allow_writes"] is True, got["r"]["amdgpu_vrm"]
+    row = next(i for i in range(x.guards.rowCount()) if "scaled limits" in x.guards.item(i, 0).text() and "real power" in x.guards.item(i, 0).text())
+    x.guards.item(row, 2).setText("550 W")
+    x.btn_guards_apply.click()
+    _wait(app, lambda: "guard changes saved" in x.msg.text(), 5, "guards saved")
+    got.clear()
+    w.link.request({"cmd": "experimental_get"}, lambda r: got.setdefault("r", r))
+    _wait(app, lambda: "r" in got, 5, "experimental_get after guards")
+    assert next(g for g in got["r"]["guards"] if g["name"] == x.guards.item(row, 0).text())["above"] == 550.0
+    x.confirm = lambda title, text: True                  # no modal dialogs offscreen
+    assert x.btn_pin.isEnabled()
+    x.btn_pin.click()
+    _wait(app, lambda: x.fw_log.isVisible() and "mock pin" in x.fw_log.toPlainText(), 5, "pin log streaming")
+    _wait(app, lambda: "Reboot" in x.msg.text(), 8, "pin finished")
+    assert "known-good" in x.fw_status.text()
+    x.btn_disable.click()
+    _wait(app, lambda: x.stack.currentIndex() == 0, 5, "notice back after disabling")
+    w.tabs.setCurrentIndex(0)
+
     # --- daemon goes away: banner, '—'-safe, and recovery
     mock.terminate()
     mock.wait(5)

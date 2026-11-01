@@ -90,49 +90,128 @@ DEFAULTS = {
 
 _lock = threading.Lock()
 _cfg = None
+_user: dict = {}          # what the file on disk says (only the keys the user set)
+
+
+def _merge(cfg: dict, user: dict) -> dict:
+    for k, v in user.items():
+        if isinstance(v, dict) and isinstance(cfg.get(k), dict):
+            cfg[k].update(v)
+        else:
+            cfg[k] = v
+    return cfg
+
+
+def _finish_guards(cfg: dict) -> dict:
+    for g in cfg.get("guards") or []:
+        # 0.1 shipped "nv*.pin?.a", which also matched the connector total "nv0.pins.a"
+        if isinstance(g, dict) and g.get("sensor") == "nv*.pin?.a":
+            g["sensor"] = "nv*.pin[0-9].a"
+        # "guard_overrides": {"<guard name>": {"above": 420, "enabled": true}} tweaks one guard
+        # without copying the whole list
+        if isinstance(g, dict) and isinstance(cfg.get("guard_overrides"), dict):
+            g.update(cfg["guard_overrides"].get(g.get("name"), {}) or {})
+    return cfg
 
 
 def load() -> dict:
-    global _cfg
+    global _cfg, _user
     with _lock:
-        cfg = copy.deepcopy(DEFAULTS)
+        user: dict = {}
         try:
             with open(PATH) as f:
                 user = json.load(f)
-            for k, v in user.items():
-                if isinstance(v, dict) and isinstance(cfg.get(k), dict):
-                    cfg[k].update(v)
-                else:
-                    cfg[k] = v
+            if not isinstance(user, dict):
+                raise ValueError("top level is not an object")
         except FileNotFoundError:
             pass
         except (OSError, ValueError) as e:
             print(f"meat3: config {PATH} unreadable ({e}); using defaults")
-        for g in cfg.get("guards") or []:
-            # 0.1 shipped "nv*.pin?.a", which also matched the connector total "nv0.pins.a"
-            if isinstance(g, dict) and g.get("sensor") == "nv*.pin?.a":
-                g["sensor"] = "nv*.pin[0-9].a"
-            # "guard_overrides": {"<guard name>": {"above": 420, "enabled": true}} tweaks one guard
-            # without copying the whole list
-            if isinstance(g, dict) and isinstance(cfg.get("guard_overrides"), dict):
-                g.update(cfg["guard_overrides"].get(g.get("name"), {}) or {})
-        _cfg = cfg
-        return cfg
+            user = {}
+        # a full default guard list that an older save() wrote into the file is not a user setting:
+        # drop it so new built-in guards keep arriving
+        if user.get("guards") == DEFAULTS["guards"]:
+            user.pop("guards")
+        _user = copy.deepcopy(user)
+        _cfg = _finish_guards(_merge(copy.deepcopy(DEFAULTS), user))
+        return _cfg
 
 
 def get() -> dict:
     return _cfg if _cfg is not None else load()
 
 
+def user_settings() -> dict:
+    """The keys the user actually set (a copy of the file's contents)."""
+    if _cfg is None:
+        load()
+    return copy.deepcopy(_user)
+
+
+def _diff(value, default):
+    """The part of `value` that differs from `default` (None when nothing does)."""
+    if isinstance(value, dict) and isinstance(default, dict):
+        out = {}
+        for k, v in value.items():
+            if k not in default:
+                out[k] = v
+                continue
+            d = _diff(v, default[k])
+            if d is not None:
+                out[k] = d
+        return out or None
+    return None if value == default else value
+
+
+def _write(user: dict) -> None:
+    os.makedirs(os.path.dirname(PATH), exist_ok=True)
+    tmp = PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(user, f, indent=2)
+    os.replace(tmp, PATH)
+
+
 def save(cfg: dict) -> None:
-    global _cfg
+    """Persist an edited copy of get(): only what differs from the built-in defaults is written, so the
+    file never freezes a default list (the guards) at the version that happened to be running."""
+    global _cfg, _user
     with _lock:
-        os.makedirs(os.path.dirname(PATH), exist_ok=True)
-        tmp = PATH + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(cfg, f, indent=2)
-        os.replace(tmp, PATH)
+        effective_defaults = _finish_guards(_merge(copy.deepcopy(DEFAULTS),
+                                                   {"guard_overrides": cfg.get("guard_overrides", {})}))
+        user = _diff(cfg, effective_defaults) or {}
+        if "guard_overrides" in cfg and cfg["guard_overrides"] and "guard_overrides" not in user:
+            user["guard_overrides"] = cfg["guard_overrides"]
+        _write(user)
+        _user = copy.deepcopy(user)
         _cfg = cfg
+
+
+def update_user(patch: dict) -> dict:
+    """Deep-merge `patch` into the user's settings file (a value of None deletes the key), then reload.
+    Returns the new effective config."""
+    with _lock:
+        user = copy.deepcopy(_user) if _cfg is not None else {}
+        if _cfg is None:
+            try:
+                with open(PATH) as f:
+                    user = json.load(f)
+            except (OSError, ValueError):
+                user = {}
+
+        def merge(dst: dict, src: dict) -> None:
+            for k, v in src.items():
+                if v is None:
+                    dst.pop(k, None)
+                elif isinstance(v, dict) and isinstance(dst.get(k), dict):
+                    merge(dst[k], v)
+                elif isinstance(v, dict):
+                    dst[k] = {}
+                    merge(dst[k], v)
+                else:
+                    dst[k] = v
+        merge(user, patch)
+        _write(user)
+    return load()
 
 
 def shunt_factor(pci: str) -> float:

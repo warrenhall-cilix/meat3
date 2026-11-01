@@ -79,8 +79,9 @@ below does not depend on these readings: its guard uses the firmware's board pow
 
 These are under Overclock → VRM voltage offsets.
 
-**Locked by default.** They only appear after you set
-`"amdgpu_vrm": {"allow_writes": true}` in `/etc/meat3/config.json` and restart `meat3d`.
+**Locked by default.** They only appear after you switch on *Allow writes* on the desktop app's
+Experimental tab (or set `"amdgpu_vrm": {"allow_writes": true}` in `/etc/meat3/config.json` and restart
+`meat3d`). The same tab holds the firmware pin, the scale caps and the guard thresholds.
 
 **Safety behaviour:**
 - Every write is read back.

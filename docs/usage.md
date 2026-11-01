@@ -77,6 +77,25 @@ Profiles are saved in `~/.config/meat3/profiles/<name>.json` as `{control id: va
 Choose which sensors the on-screen display shows, set the hotkey and generate the MangoHud config.
 See [osd.md](osd.md).
 
+### Experimental
+
+![Experimental tab](screenshots/experimental-dark.png)
+
+Hidden behind a notice you accept once per machine (the daemon remembers it in its config). It holds
+the things that go below the driver and below AMD's firmware limits:
+
+- **SMU firmware pin** for RX 9070 / 9070 XT: the status of the running and installed firmware, and
+  Pin / Restore buttons that run `meat3-smufw` as root with the log shown. Reboot afterwards.
+- **Regulator (VRM) writes**: the `allow_writes` switch, the MPS offset step size, restore-on-stop and
+  the unverified MPS gain writes.
+- **Limits**: the maximum TBP and TDC scale (up to the 1.5× hard cap) and the maximum regulator
+  voltage offset.
+- **Safety guards**: every guard with its threshold and on/off switch, and a reset to the built-in list.
+
+Changes are written to `/etc/meat3/config.json` and the daemon re-reads them straight away. The
+controls themselves stay where they are (Overclock tab); this page only decides what they are allowed
+to do. See [rdna4.md](rdna4.md).
+
 ### Themes
 
 Choose one under View → Theme:

@@ -798,6 +798,45 @@ class MockDaemon:
                 break
             self.poll()
 
+    # -- experimental tab (GUI smoke test)
+    @staticmethod
+    def _default_guards() -> list:
+        from .config import DEFAULTS
+        import copy
+        return [dict(g) for g in copy.deepcopy(DEFAULTS["guards"])]
+
+    @property
+    def experimental(self) -> dict:
+        x = self.__dict__.get("_experimental_state")
+        if x is None:
+            x = {
+                "accepted": False,
+                "amdgpu_vrm": {"allow_writes": False, "restore_on_stop": True, "experimental_mps_writes": False,
+                               "max_tbp_scale": 1.3, "max_tdc_scale": 1.3, "max_offset_mv": 50, "mps_offset_lsb_mv": None},
+                "guards": self._default_guards(), "user_guards_list": False,
+                "run": {"action": "", "running": False, "rc": None, "log": [], "started": 0.0, "finished": 0.0},
+                "run_done_at": 0.0}
+            self.__dict__["_experimental_state"] = x
+        if x["run"]["running"] and time.time() >= x["run_done_at"]:
+            x["run"]["running"], x["run"]["rc"], x["run"]["finished"] = False, 0, time.time()
+            x["run"]["log"].append("done. Reboot; then `meat3-smufw` should report PMFW 0x684a00 and meat3's VRM rows should fill in."
+                                   if x["run"]["action"] == "pin" else "done. Reboot to run the distribution firmware again.")
+            x["pinned"] = x["run"]["action"] == "pin"
+        return x
+
+    def _experimental(self) -> dict:
+        x = self.experimental
+        pinned = x.get("pinned", False)
+        return {"accepted": x["accepted"], "hard_max_scale": 1.5, "amdgpu_vrm": dict(x["amdgpu_vrm"]),
+                "guards": [dict(g) for g in x["guards"]], "user_guards_list": x["user_guards_list"],
+                "smufw": {"devices": [{"pci": "0000:03:00.0", "pmfw": 0x685000, "pmfw_hex": "0x685000",
+                                       "vrm_bus_open": False, "good_pmfw_hex": "0x684a00", "file": "smu_14_0_3.bin",
+                                       "installed": "/usr/lib/firmware/amdgpu/smu_14_0_3.bin.zst", "pinned": pinned,
+                                       "kernel_loadable": True, "backup": pinned, "reboot_needed": pinned,
+                                       "note": "known-good file installed; reboot to run it" if pinned else ""}],
+                          "hook": pinned},
+                "smufw_run": dict(x["run"], log=list(x["run"]["log"]))}
+
     # -- protocol
     def handle(self, req: Any) -> dict:
         if not isinstance(req, dict):
@@ -882,6 +921,37 @@ class MockDaemon:
                 en = self.osd_enabled
             self.write_osd()
             return {"ok": True, "enabled": en}
+        if cmd == "experimental_get":
+            return {"ok": True, **self._experimental(), "can_write": True}
+        if cmd == "experimental_set":
+            x = self.experimental
+            for k, v in (req.get("settings") or {}).items():
+                if k == "experimental.accepted":
+                    x["accepted"] = bool(v)
+                elif k.startswith("amdgpu_vrm."):
+                    x["amdgpu_vrm"][k.split(".", 1)[1]] = v
+                else:
+                    return {"ok": False, "msg": f"{k}: not an experimental setting"}
+            for name, fields in (req.get("guards") or {}).items():
+                g = next((g for g in x["guards"] if g["name"] == name), None)
+                if g is None:
+                    return {"ok": False, "msg": f"guard {name!r} does not exist"}
+                g.update({k: v for k, v in fields.items() if k in ("above", "enabled")})
+            if req.get("reset_guards"):
+                x["guards"] = self._default_guards()
+                x["user_guards_list"] = False
+            return {"ok": True, **self._experimental()}
+        if cmd == "smufw_run":
+            x = self.experimental
+            if not x["accepted"]:
+                return {"ok": False, "msg": "accept the experimental-features notice first"}
+            act = req.get("action")
+            if act not in ("pin", "restore"):
+                return {"ok": False, "msg": f"unknown action {act!r}"}
+            x["run"] = {"action": act, "running": True, "rc": None, "started": time.time(), "finished": 0.0,
+                        "log": [f"== mock {act}", "backing up smu_14_0_3.bin.zst", "regenerating initramfs: mkinitcpio -p linux"]}
+            x["run_done_at"] = time.time() + 1.0
+            return {"ok": True, "msg": f"{act} started"}
         if cmd == "update_status":
             return {"ok": True, "installed": "mock", "behind": 2, "checking": False, "running": False,
                     "commits": ["abc1234 mock change one", "def5678 mock change two"], "log": [],

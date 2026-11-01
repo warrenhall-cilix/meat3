@@ -1246,6 +1246,21 @@ class AmdGpuBackend(Backend):
     def _write(self, path: str, data: str) -> None:
         self.io.write(path, data)
 
+    def reload_config(self, cfg: dict) -> None:
+        """Experimental tab changed amdgpu_vrm.*: apply to the live VrmAccess without a daemon restart."""
+        v = self.vrm
+        c = cfg.get("amdgpu_vrm") or {}
+        if v is None:
+            return
+        v.allow_writes = bool(c.get("allow_writes", False))
+        v.max_offset_mv = float(c.get("max_offset_mv", 50))
+        v.max_current_scale = float(c.get("max_current_scale", 1.5))
+        v.mps_lsb_mv = c.get("mps_offset_lsb_mv")
+        v.mps_experimental = bool(c.get("experimental_mps_writes", False))
+        v.max_tbp_scale = min(vrmm.HARD_MAX_SCALE, float(c.get("max_tbp_scale", 1.3)))
+        v.max_tdc_scale = min(vrmm.HARD_MAX_SCALE, float(c.get("max_tdc_scale", 1.3)))
+        v.restore_on_stop = bool(c.get("restore_on_stop", True))
+
     def close(self) -> None:
         if self.vrm is not None:
             try:

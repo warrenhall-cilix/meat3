@@ -81,6 +81,13 @@ next daemon start skips them and logs why. It uses the marker file
 `~/.config/meat3/profiles/<name>.json`, which maps control ids to values. Sensor ids, which the
 guards use, are listed by `sudo meat3d --once`.
 
+### What the file holds
+
+Only the keys you set. meat³ merges them over its built-in defaults at start, and anything it saves
+itself (the OSD, the Experimental tab) is written back as the difference from those defaults, so a new
+built-in guard still arrives with the next update. A full `guards` list that an older version wrote
+into the file is dropped at load when it equals the defaults of the running version.
+
 ### Guards
 
 `guards` is a list of rules the daemon checks every poll:

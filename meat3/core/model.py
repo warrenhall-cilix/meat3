@@ -72,5 +72,8 @@ class Backend(ABC):
         the advertised min/max. Returns (ok, message)."""
         return False, "not supported"
 
+    def reload_config(self, cfg: dict) -> None:
+        """Optional: the daemon's config changed at runtime (Experimental tab); re-read what applies."""
+
     def close(self) -> None:
         pass

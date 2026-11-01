@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QMainW
 
 from meat3.gui.client import DaemonLink, default_socket_path
 from meat3.gui.cores import CoresPage
+from meat3.gui.experimental import ExperimentalPage
 from meat3.gui.graphs import GraphsPage
 from meat3.gui.common import (THEMES, KdeSchemeWatcher, SensorStore, app_icon, apply_theme,
                               install_none_refcount_guard, paint_backdrop, setting_bool, settings, theme,
@@ -103,6 +104,8 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.cores, "Cores")
         self.tabs.addTab(self.overclock, "Overclock")
         self.tabs.addTab(self.osd, "OSD")
+        self.experimental = ExperimentalPage(self.link)
+        self.tabs.addTab(self.experimental, "Experimental")
         v.addWidget(self.tabs, 1)
         self.setCentralWidget(central)
 
