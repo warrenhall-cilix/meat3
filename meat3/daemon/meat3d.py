@@ -503,6 +503,22 @@ def apply_on_start(state) -> bool:
 
 
 # ----------------------------------------------------------------------------- main
+def installed_version() -> str:
+    """git describe of the running code: /opt/meat3/VERSION (written by install.sh) or the checkout's git."""
+    here = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    try:
+        with open(os.path.join(here, "VERSION")) as f:
+            return f.read().strip() or "unknown"
+    except OSError:
+        pass
+    try:
+        import subprocess
+        r = subprocess.run(["git", "-C", here, "describe", "--always", "--dirty"], capture_output=True, text=True, timeout=5)
+        return r.stdout.strip() or "unknown"
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+
+
 def main():
     ap = argparse.ArgumentParser(prog="meat3d")
     ap.add_argument("--socket", default=os.path.join(RUN_DIR, "meat3.sock"))
@@ -524,7 +540,8 @@ def main():
         for s in state.sensors:
             v = s["value"]
             print(f"{s['group']:<55} {s['label']:<42} {'—' if v is None else round(v, s.get('decimals', 0))} {s['unit']}")
-        print(f"\n{len(state.sensors)} sensors, {len(state.controls)} controls, poll {state.poll_ms:.0f} ms")
+        print(f"\n{len(state.sensors)} sensors, {len(state.controls)} controls, poll {state.poll_ms:.0f} ms, "
+              f"meat3 {installed_version()} from {os.getcwd()}")
         return
 
     os.makedirs(RUN_DIR, exist_ok=True)
@@ -541,7 +558,7 @@ def main():
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     if not args.no_hotkey:
         threading.Thread(target=hotkey_thread, args=(state,), daemon=True).start()
-    print(f"meat3d {VERSION}: {len(backends)} backends, socket {args.socket}")
+    print(f"meat3d {VERSION} ({installed_version()}): {len(backends)} backends, socket {args.socket}")
     applied = apply_on_start(state)
     if applied:
         state.refresh_controls()
