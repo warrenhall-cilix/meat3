@@ -78,12 +78,14 @@ RDNA4P_FIELDS = [("pg_vr1", 11), ("cg1_vr1", 11), ("pg_vr2", 11), ("gfx_vid", 1)
                  ("vddci_vid", 1), ("vram_vid", 1), ("trim_vr1", 7), ("cg1_alt_vr1", 7), ("droop_vr1", 8)]
 HARD_MAX_SCALE = 1.5          # the control range never exceeds this whatever the config says
 MP2868A_MODEL_BYTE = 0x68
-# First real RX 9070 XT (ASUS, PMFW 0x684a00, 365 W board, 2026-11-01), MP2868A at 0x22 page 0 against the
-# firmware's own metrics table at the same instant: READ_IOUT 120.0 A vs firmware GFX current 239.1 A (x1.99),
-# so the GFX loop reports half; READ_POUT 317 W vs 258 W and READ_IIN x VIN 396 W for a ~270 W output are not
-# usable as read. On MPS controllers meat3 therefore doubles the GFX IOUT, takes rail power as VOUT x IOUT, and
-# does not trust READ_IIN for the real-power figure. Both cross-checks are published as sensors.
-MP2868A_GFX_IOUT_MULT = 2.0
+# First real RX 9070 XT (ASUS, PMFW 0x684a00, 2026-11-01), MP2868A at 0x22/0x24, two game samples against
+# the firmware's metrics table: temperatures match the firmware's VR temperatures exactly; SoC and memory
+# rail currents agree within 10 %; the GFX loop's READ_IOUT read 120 A then 306 A while the firmware's
+# averaged GFX current was 239 A then 210 A, and READ_IIN x VIN read 425 W then 242 W against 365 W and
+# 352 W board power. Single PMBus reads are instantaneous and a game load swings by 2x within a second, so
+# they cannot be calibrated against the firmware's averages one sample at a time. meat3 therefore keeps the
+# plain PMBus decode, does not use READ_IIN for the real-power figure on MPS, and publishes 30 s averaged
+# VRM/firmware ratios (amdgpu.py) so agreement can be judged over time.
 # AMD's SMU firmware stopped exposing the VR bus on its I2C adapters after PMFW 0x684a00
 # (linux-firmware 2025-06-20 / release 20251111); 0x684b00 (2025-11-19) and later answer at no address.
 SMU14_I2C_LAST_GOOD = 0x684A00
@@ -657,15 +659,9 @@ class VrmAccess:
                         r[name + "_factory_raw"] = self._factory(c, page, "/" + name, raw)
                     fg = linear11(r["gain_factory_raw"]) if "gain_factory_raw" in r else 0
                     r["scale"] = r["gain_mohm"] / fg if fg > 0 and r.get("gain_mohm", 0) > 0 else 1.0
-                    if c.mp2868a and c.addr == 0x22 and page == 0:
-                        r["iout"] *= MP2868A_GFX_IOUT_MULT
                     r["iout_real"] = r["iout"] * r["scale"]
-                    r["pout_reg"] = r["pout"] * r["scale"]
-                    if c.profile == "mps" and r.get("vout") is not None:
-                        r["pout_real"] = r["vout"] * r["iout_real"]      # READ_POUT over-reads on MPS
-                    else:
-                        r["pout_real"] = r["pout"] * r["scale"]
-                    r["iin_trusted"] = c.profile != "mps"
+                    r["pout_real"] = r["pout"] * r["scale"]
+                    r["iin_trusted"] = c.profile != "mps"     # MPS READ_IIN: 425 W then 242 W vs 365/352 W firmware
                 except OSError as ex:
                     r["error"] = ex.strerror or str(ex)
                 out[(c.addr, page)] = r

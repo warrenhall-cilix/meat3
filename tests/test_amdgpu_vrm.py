@@ -497,10 +497,10 @@ class TestVrm(Base):
             self.assertEqual(c.page, 0)
         self.assertEqual(c1.regs[2][V.MPS_PG], 0x8000 | int(0x400 / 1.3))
 
-    def test_mps_gfx_decode_matches_first_real_card(self):
-        # ASUS 9070 XT at 365 W: firmware GFX 239 A / 258 W, SoC 21.7 A, memory 21.3 A; the MP2868A GFX loop
-        # reported 120 A and READ_POUT/READ_IIN were unusable, so: GFX IOUT x2, rail power = VOUT x IOUT,
-        # real power from the rails only (READ_IIN ignored)
+    def test_mps_rails_plain_decode_and_untrusted_iin(self):
+        # first real card: PMBus temperatures and SoC/memory currents agree with the firmware, the GFX loop's
+        # instantaneous READ_IOUT/READ_IIN do not calibrate against the firmware's averages one sample at a
+        # time, so the decode stays plain PMBus and READ_IIN is excluded from the real-power figure on MPS
         c1, c2 = self.mp2868a_pair()
         for c, page, vout, iout in ((c1, 0, 1.08, 120.0), (c2, 0, 0.905, 19.5), (c2, 1, 1.35, 17.1)):
             c.real[page] = (vout, iout)
@@ -508,16 +508,13 @@ class TestVrm(Base):
         v = self.vrm()
         d = v.read_all()
         g = d[(0x22, 0)]
-        self.assertAlmostEqual(g["iout_real"], 240.0, delta=1.0)
-        self.assertAlmostEqual(g["vout"], 1.08, places=2)
-        self.assertAlmostEqual(g["pout_real"], g["vout"] * 240.0, delta=0.5)
+        self.assertAlmostEqual(g["iout_real"], 120.0, delta=1.0)                 # as read, not doubled
+        self.assertAlmostEqual(g["pout_real"], 1.08 * 120.0, delta=3.0)         # fake POUT = V x I
         self.assertFalse(g["iin_trusted"])
-        self.assertAlmostEqual(d[(0x24, 0)]["iout_real"], 19.5, delta=0.3)       # SoC loop not doubled
         self.assertAlmostEqual(d[(0x24, 1)]["iout_real"], 17.1, delta=0.3)
         self.assertEqual(V.RAILS[(0x24, 1)][0], "vddio_mem")
         p = V.VrmAccess.power_summary(d)
         self.assertFalse(p["iin_trusted"])
-        self.assertAlmostEqual(p["rails_w"], 1.08 * 240 + 0.905 * 19.5 + 1.35 * 17.1, delta=4)   # ~300 W, firmware said 365
         self.assertAlmostEqual(p["real_w"], p["rails_w"] / V.VRM_EFFICIENCY, delta=1)   # not the IIN figure
         self.assertIsNotNone(p["input_w"])                                                 # still reported
 

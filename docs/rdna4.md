@@ -66,12 +66,14 @@ limit:
 "guard_overrides": {"AMD real power (VRM) over limit": {"above": 420, "enabled": true}}
 ```
 
-**Checked on a real RX 9070 XT (ASUS, MP2868A at 0x22 and 0x24):** the SoC and memory rails agree with
-the firmware within 10 %. The GFX loop reports half the firmware's GFX current, so meat³ doubles it;
-`READ_POUT` and `READ_IIN` read high, so rail power is `VOUT x IOUT` and the regulators' 12 V input
-power is shown as unverified and not used for the real-power figure. Two cross-check rows,
-*VRM real power / firmware board power* and *VRM GFX current / firmware GFX current*, should sit
-between 0.9 and 1.1 at stock gains; if yours don't, say so before scaling anything.
+**Checked on a real RX 9070 XT (ASUS, MP2868A at 0x22 and 0x24):** the regulator temperatures match the
+firmware's VR temperatures exactly and the SoC and memory rail currents agree within 10 %. The GFX
+loop's current and the 12 V input current are instantaneous reads that swing with the frame load, so
+they can't be compared with the firmware's averages one sample at a time; the 12 V input power is
+shown as unverified and not used for the real-power figure. Two rows, *VRM real power / firmware
+board power* and *VRM GFX current / firmware GFX current*, average both sides over 30 polls and
+should settle between 0.9 and 1.1 at stock gains after a minute under load. The TBP/TDC scaling
+below does not depend on these readings: its guard uses the firmware's board power times the scale.
 
 ### Controls
 
