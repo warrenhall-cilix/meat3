@@ -78,6 +78,12 @@ RDNA4P_FIELDS = [("pg_vr1", 11), ("cg1_vr1", 11), ("pg_vr2", 11), ("gfx_vid", 1)
                  ("vddci_vid", 1), ("vram_vid", 1), ("trim_vr1", 7), ("cg1_alt_vr1", 7), ("droop_vr1", 8)]
 HARD_MAX_SCALE = 1.5          # the control range never exceeds this whatever the config says
 MP2868A_MODEL_BYTE = 0x68
+# First real RX 9070 XT (ASUS, PMFW 0x684a00, 365 W board, 2026-11-01), MP2868A at 0x22 page 0 against the
+# firmware's own metrics table at the same instant: READ_IOUT 120.0 A vs firmware GFX current 239.1 A (x1.99),
+# so the GFX loop reports half; READ_POUT 317 W vs 258 W and READ_IIN x VIN 396 W for a ~270 W output are not
+# usable as read. On MPS controllers meat3 therefore doubles the GFX IOUT, takes rail power as VOUT x IOUT, and
+# does not trust READ_IIN for the real-power figure. Both cross-checks are published as sensors.
+MP2868A_GFX_IOUT_MULT = 2.0
 # AMD's SMU firmware stopped exposing the VR bus on its I2C adapters after PMFW 0x684a00
 # (linux-firmware 2025-06-20 / release 20251111); 0x684b00 (2025-11-19) and later answer at no address.
 SMU14_I2C_LAST_GOOD = 0x684A00
@@ -140,7 +146,7 @@ def decode_rdna4_backup(block_vr1: int, block_vr2: int) -> Optional[dict]:
 RAILS = {  # (address, page) -> (key, label)
     (0x22, 0): ("vgfx", "VDD_GFX (GPU core)"),
     (0x24, 0): ("vsoc", "VDD_SOC"),
-    (0x24, 1): ("vddc_usr", "VDDC_USR"),
+    (0x24, 1): ("vddio_mem", "VDDIO (memory, GDDR6)"),     # 1.35 V, 17 A at 365 W on the first real card
     (0x26, 0): ("vmem", "VMEM (memory)"),
     (0x26, 1): ("vddci", "VDDCI (memory I/O)"),
 }
@@ -651,8 +657,15 @@ class VrmAccess:
                         r[name + "_factory_raw"] = self._factory(c, page, "/" + name, raw)
                     fg = linear11(r["gain_factory_raw"]) if "gain_factory_raw" in r else 0
                     r["scale"] = r["gain_mohm"] / fg if fg > 0 and r.get("gain_mohm", 0) > 0 else 1.0
+                    if c.mp2868a and c.addr == 0x22 and page == 0:
+                        r["iout"] *= MP2868A_GFX_IOUT_MULT
                     r["iout_real"] = r["iout"] * r["scale"]
-                    r["pout_real"] = r["pout"] * r["scale"]
+                    r["pout_reg"] = r["pout"] * r["scale"]
+                    if c.profile == "mps" and r.get("vout") is not None:
+                        r["pout_real"] = r["vout"] * r["iout_real"]      # READ_POUT over-reads on MPS
+                    else:
+                        r["pout_real"] = r["pout"] * r["scale"]
+                    r["iin_trusted"] = c.profile != "mps"
                 except OSError as ex:
                     r["error"] = ex.strerror or str(ex)
                 out[(c.addr, page)] = r
@@ -677,8 +690,9 @@ class VrmAccess:
         rails_w = sum(x for x in rails if x is not None) if rails else None
         ins = [(r.get("vin"), r.get("iin")) for (a, p), r in data.items() if p == 0 and "error" not in r]
         in_w = sum(v * i for v, i in ins) if ins and all(v and i is not None for v, i in ins) else None
-        cand = [x for x in (in_w, rails_w / VRM_EFFICIENCY if rails_w else None) if x is not None]
-        return {"input_w": in_w, "rails_w": rails_w, "real_w": max(cand) if cand else None}
+        iin_ok = all(r.get("iin_trusted", True) for r in data.values() if "error" not in r)
+        cand = [x for x in (in_w if iin_ok else None, rails_w / VRM_EFFICIENCY if rails_w else None) if x is not None]
+        return {"input_w": in_w, "rails_w": rails_w, "real_w": max(cand) if cand else None, "iin_trusted": iin_ok}
 
     # -------------------------------------------------------------- writes
     def can_write(self, addr: int, page: int, need_linear_vout: bool = True, what: str = "offset") -> tuple[bool, str]:

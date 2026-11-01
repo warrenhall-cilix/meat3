@@ -72,7 +72,10 @@ DEFAULTS = {
         {"name": "AMD GPU hotspot (junction) overtemp", "sensor": "amdgpu*.hwmon.temp2", "above": 105, "count": 3,
          "control": "amdgpu*.oc.power_cap", "value": "min", "enabled": True},
         # RDNA4 TBP/TDC scaling: the firmware limits are blind while scaled, so trip on the real figures
-        {"name": "AMD GPU real power (scaled limits)", "sensor": "amdgpu*.vrm.real_power_scaled", "above": 400,
+        # firmware board power x TBP scale = the real draw while scaled (the firmware sees real / scale). This is
+        # the calibrated figure; the regulators' own input-power read is unverified on MPS. 450 W suits a
+        # water-cooled 3x/4x 8-pin board; lower it (guard_overrides) on a 2x 8-pin card.
+        {"name": "AMD GPU real power (scaled limits)", "sensor": "amdgpu*.vrm.board_power_corrected", "above": 450,
          "count": 3, "control": "amdgpu*.vrm.t[bd][pc]_scale", "value": 1.0, "enabled": True},
         {"name": "AMD GPU hotspot (scaled limits)", "sensor": "amdgpu*.hwmon.temp2", "above": 100, "count": 3,
          "control": "amdgpu*.vrm.t[bd][pc]_scale", "value": 1.0, "enabled": True},

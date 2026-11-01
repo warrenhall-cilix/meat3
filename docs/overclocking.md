@@ -104,6 +104,10 @@ for a set number of polls, and then sets a control to a safe value.
 | GPU hotspot overtemp | NVIDIA hotspot above 100 °C for 3 polls | NVIDIA power limit to 300 W |
 | GPU memory overtemp | NVIDIA memory above 95 °C for 3 polls | NVIDIA power limit to 300 W |
 | AMD GPU hotspot (junction) overtemp | junction above 105 °C for 3 polls | AMD power cap to minimum |
+| Manual CPU overclock overtemp | Tctl above 90 °C for 2 polls | leaves manual SMU overclocking mode |
+| AMD GPU real power (scaled limits) | firmware board power x TBP scale above 450 W for 3 polls | TBP and TDC scales back to 1.0 |
+| AMD GPU hotspot (scaled limits) | junction above 100 °C for 3 polls | TBP and TDC scales back to 1.0 |
+| AMD GPU VRM overtemp (scaled limits) | any regulator above 105 °C for 3 polls | TBP and TDC scales back to 1.0 |
 | AMD real power (VRM) over limit (off by default) | VRM-measured power above 450 W for 3 polls | AMD GPU clock offset to minimum |
 
 To change one guard without copying the whole list, use `guard_overrides`:

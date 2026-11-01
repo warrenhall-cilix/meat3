@@ -1024,16 +1024,29 @@ class AmdGpuBackend(Backend):
                       "max(12 V input VIN x IIN over all controllers, corrected rail output / "
                       f"{vrmm.VRM_EFFICIENCY:.2f}); measured at the regulators, so still right with the "
                       "board-power shunts bypassed. Excludes fans/LEDs and the PCIe slot's 3.3 V."),
-               Sensor(f"{P}.vrm.input_power", G, "VRM 12 V input power", pw["input_w"], "W", 0,
-                      "sum of READ_VIN x READ_IIN (page 0 of each controller)"),
+               Sensor(f"{P}.vrm.input_power", G, "VRM 12 V input power" + ("" if pw.get("iin_trusted", True) else " (unverified)"),
+                      pw["input_w"], "W", 0, "sum of READ_VIN x READ_IIN (page 0 of each controller)" +
+                      ("" if pw.get("iin_trusted", True) else "; MPS READ_IIN reads ~1.4x the firmware's board power "
+                       "on the first RDNA4 card, so it is shown but not used for the real-power figure")),
                Sensor(f"{P}.vrm.rails_power", G, "VRM output power (all rails)", pw["rails_w"], "W", 0,
-                      "sum of READ_POUT x current scale"),
+                      "sum of rail power x current scale (MPS: VOUT x IOUT; others: READ_POUT)"),
                Sensor(f"{P}.vrm.shunt_bypass", G,
                       "Board power sensing: BYPASSED (driver power is not real)" if bypass else "Board power sensing: normal",
                       1.0 if bypass else 0.0, "", 0,
                       f"driver/firmware board power {board if board is not None else '?'} W vs regulators "
                       f"{pw['real_w'] or 0:.0f} W; bypassed = shunt sense shorted, so the firmware power limit no "
                       "longer applies. Use the real power sensor (and its guard) instead.")]
+        if board and pw["real_w"] and board > 60:
+            out.append(Sensor(f"{P}.vrm.vs_firmware", G, "VRM real power / firmware board power", pw["real_w"] / board, "x", 2,
+                              "cross-check of the regulator decode against the firmware's board power; 0.9..1.1 "
+                              "expected at stock gains (scaled gains raise it by the TBP scale, by design)"))
+        fw_gfx_a = next((self._seen_rows.get(k, {}).get("value") for k in ("average_gfx_current", "fm.AvgCurrent_gfx")
+                         if self._seen_rows.get(k, {}).get("value") is not None), None)
+        vr_gfx_a = (data.get((0x22, 0)) or {}).get("iout_real")
+        if fw_gfx_a and vr_gfx_a and fw_gfx_a > 40:
+            out.append(Sensor(f"{P}.vrm.vgfx.iout_vs_fw", G, "VRM GFX current / firmware GFX current", vr_gfx_a / fw_gfx_a, "x", 2,
+                              "cross-check of READ_IOUT (x2 on MP2868A) against the firmware's GFX rail current; "
+                              "0.9..1.1 expected at stock gains"))
         out.append(Sensor(f"{P}.vrm.status", G, "VRM: " + ", ".join(
             f"0x{c.addr:02x} {c.mfr} {c.model}".strip() for c in v.controllers), float(len(v.controllers)), "", 0,
             "PMBus controllers on the GPU's SMU I2C bus; read via standard telemetry commands"))

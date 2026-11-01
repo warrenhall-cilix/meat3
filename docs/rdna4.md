@@ -66,6 +66,13 @@ limit:
 "guard_overrides": {"AMD real power (VRM) over limit": {"above": 420, "enabled": true}}
 ```
 
+**Checked on a real RX 9070 XT (ASUS, MP2868A at 0x22 and 0x24):** the SoC and memory rails agree with
+the firmware within 10 %. The GFX loop reports half the firmware's GFX current, so meat³ doubles it;
+`READ_POUT` and `READ_IIN` read high, so rail power is `VOUT x IOUT` and the regulators' 12 V input
+power is shown as unverified and not used for the real-power figure. Two cross-check rows,
+*VRM real power / firmware board power* and *VRM GFX current / firmware GFX current*, should sit
+between 0.9 and 1.1 at stock gains; if yours don't, say so before scaling anything.
+
 ### Controls
 
 These are under Overclock → VRM voltage offsets.
@@ -127,10 +134,11 @@ writes but keeps the corrected picture:
 * the stock gains are backed up on the chip in the rdna4p script's own 68-bit CRC format before the
   first write (an existing script backup is recognised and used as stock), and mirrored in
   `/var/lib/meat3/vrm_factory.json`;
-* sensors `vrm.real_power_scaled` (regulator input power x TBP scale), `vrm.board_power_corrected`
+* sensors `vrm.real_power_scaled` (regulator-measured power x TBP scale), `vrm.board_power_corrected`
   (driver board power x scale) and `vrm.gfx_current_corrected` show the real numbers while the driver's
   own rows read low by the scale factor;
-* default guards drop both scales to 1.0 when the real power passes 400 W, the hotspot passes 100 °C or
+* default guards drop both scales to 1.0 when the real power (firmware board power x TBP scale) passes
+  450 W, the hotspot passes 100 °C or
   any VRM temperature passes 105 °C (edit `guards` in `/etc/meat3/config.json`);
 * meat3d writes the stock gains back when it stops (`amdgpu_vrm.restore_on_stop`); a power cycle also
   clears them, a warm reboot does not.
