@@ -1,0 +1,22 @@
+--- a/drivers/gpu/drm/amd/pm/swsmu/smu14/smu_v14_0_2_ppt.c
++++ b/drivers/gpu/drm/amd/pm/swsmu/smu14/smu_v14_0_2_ppt.c
+@@ -505,11 +505,18 @@
+ 		 * labelled maximum clock frequency(for example in pp_dpm_sclk
+ 		 * sysfs output).
+ 		 */
++		/*
++		 * meat3 clock pin: the labelled maximum is also the upper bound
++		 * the debugfs amdgpu_force_sclk accepts. Keep it at 160 % of the
++		 * game clock so a pin at the card's real boost clocks (with an
++		 * overdrive offset) is allowed; the firmware clamps internally.
++		 */
+ 		if (skutable->DriverReportedClocks.GameClockAc &&
+ 		    (dpm_table->dpm_levels[dpm_table->count - 1].value >
+ 		    skutable->DriverReportedClocks.GameClockAc)) {
+ 			dpm_table->dpm_levels[dpm_table->count - 1].value =
+-				skutable->DriverReportedClocks.GameClockAc;
++				max_t(uint32_t, dpm_table->dpm_levels[dpm_table->count - 1].value,
++				      skutable->DriverReportedClocks.GameClockAc * 8 / 5);
+ 		}
+ 	} else {
+ 		dpm_table->count = 1;

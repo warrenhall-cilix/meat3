@@ -158,6 +158,28 @@ Prerequisites, in order:
 Start at 1.1x, watch `Real power (VR, gain-corrected)` and the hotspot under a real game, and go up in
 0.05 steps. A crash under load is the card telling you the clock or voltage is the limit now, not power.
 
+## Pinned GFX clock (soft min = max)
+
+The firmware's clock target on these cards moves with the scene: at the voltage ceiling it promises
+less under a heavier load, so a card can swing between 3.2 and 3.6 GHz with no limiter flagged but
+Vmax. The **GFX clock pin** control (Overclock tab, danger level 2) asks the firmware for soft
+minimum = soft maximum = one clock through the kernel's own debugfs `amdgpu_force_sclk`; 0 switches
+it off by letting the driver re-send its default range through the performance level, and the daemon
+switches it off when it stops.
+
+What it can and cannot do:
+
+- A pin at or below the heavy-scene clock gives a flat clock and flat frame times, at the cost of the
+  light-scene peaks and of idle downclocking.
+- A pin above what the card holds at its voltage ceiling is not reached (the clock droops below the
+  request) or crashes the game in the heavy scenes. It cannot beat Vmax; only a curve undervolt moves
+  that number.
+- The stock driver refuses pins above the labelled DPM maximum, which SMU14 clamps to the firmware's
+  game clock (2970 MHz on an RX 9070 XT). `bash tools/build_patched_amdgpu.sh --with-clock-pin` builds
+  amdgpu with the small patch in `kmod/amdgpu-clock-pin/` that raises that label to 160 % of the game
+  clock; the control's range follows. The patch changes one clamp; the firmware keeps its own limits.
+- Needs a mounted debugfs and root (meat3d has both).
+
 ## `meat3-smufw`: SMU firmware pin
 
 ```sh

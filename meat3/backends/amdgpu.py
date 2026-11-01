@@ -276,6 +276,7 @@ class AmdGpuBackend(Backend):
         self.dev = device_dir            # path inside the (possibly redirected) root
         self.index = index
         self.prefix = f"amdgpu{index}"
+        self.clock_pin = 0               # MHz asked of debugfs amdgpu_force_sclk by meat3 (0 = not pinned)
         uevent = self._r("uevent") or ""
         m = re.search(r"PCI_SLOT_NAME=(\S+)", uevent)
         self.slot = m.group(1) if m else os.path.basename(os.path.realpath(self.dev))
@@ -814,6 +815,13 @@ class AmdGpuBackend(Backend):
                 ps.append(p)
         return ps
 
+    def _force_sclk_path(self) -> Optional[str]:
+        """/sys/kernel/debug/dri/<minor>/amdgpu_force_sclk (stock debugfs; needs root and a mounted debugfs)."""
+        m = re.search(r"card(\d+)", os.path.realpath(self.dev) if self.io.root == "/" else self.dev)
+        if not m:
+            return None
+        return self.io.p(f"/sys/kernel/debug/dri/{m.group(1)}/amdgpu_force_sclk")
+
     def _perf_level(self) -> Optional[str]:
         t = self._r("power_dpm_force_performance_level")
         return t.strip() if t else None
@@ -872,6 +880,24 @@ class AmdGpuBackend(Backend):
                                   hint="power_dpm_force_performance_level" + ("" if w_ok else root_hint),
                                   available=w_ok),
                           {"type": "perf_level", "path": lvl_path}))
+
+        pin_path = self._force_sclk_path()
+        if pin_path and os.path.exists(pin_path):
+            levels, _, _ = parse_pp_dpm(self._r("pp_dpm_sclk"))
+            lo, hi = (min(levels), max(levels)) if levels else (0.0, 0.0)
+            w_ok = os.access(pin_path, os.W_OK)
+            specs.append((Control(f"{P}.oc.clock_pin", G, "GFX clock pin (soft min = max)", "int",
+                                  value=self.clock_pin, min=0, max=hi, step=25, unit="MHz", default=0, danger=2,
+                                  hint=(f"debugfs amdgpu_force_sclk: asks the firmware for soft minimum = soft maximum = "
+                                        f"this clock; 0 = off (DPM range {lo:g}..{hi:g} MHz back via the performance "
+                                        f"level). Anything the card cannot hold at its voltage ceiling is not reached, "
+                                        f"and in heavy scenes may crash; this cannot beat Vmax. The stock driver "
+                                        f"accepts at most the labelled DPM maximum {hi:g} MHz (the firmware's game "
+                                        f"clock); tools/build_patched_amdgpu.sh --with-clock-pin raises it. A driver "
+                                        f"performance-level change (or a reboot) clears the pin.") + ("" if w_ok else root_hint),
+                                  available=w_ok and bool(levels)),
+                          {"type": "clock_pin", "path": pin_path, "lo": lo, "hi": hi,
+                           "level_path": os.path.join(self.dev, "power_dpm_force_performance_level")}))
 
         prof_path = os.path.join(self.dev, "pp_power_profile_mode")
         if os.path.exists(prof_path):
@@ -1243,6 +1269,26 @@ class AmdGpuBackend(Backend):
 
     # ---- apply -----------------------------------------------------------------------
 
+    def _apply_clock_pin(self, meta: dict, mhz: int) -> tuple[bool, str]:
+        if mhz == 0:
+            return self._unpin_clock(meta["level_path"])
+        if mhz < meta["lo"]:
+            return False, f"{mhz} MHz is below the DPM minimum {meta['lo']:g} MHz (0 switches the pin off)"
+        self._write(meta["path"], f"{mhz}\n")
+        self.clock_pin = mhz
+        return True, (f"GFX clock pinned: soft min = soft max = {mhz} MHz requested from the firmware "
+                      "(the card still stops at its voltage ceiling)")
+
+    def _unpin_clock(self, level_path: str) -> tuple[bool, str]:
+        """The driver re-sends its default soft range when the performance level is set; 'auto' does that for
+        every level, then the previous level is put back."""
+        prev = self._perf_level()
+        self._write(level_path, "auto\n")
+        if prev and prev != "auto":
+            self._write(level_path, f"{prev}\n")
+        self.clock_pin = 0
+        return True, "GFX clock pin off: the driver's DPM range is back" + (f" (performance level {prev})" if prev else "")
+
     def _write(self, path: str, data: str) -> None:
         self.io.write(path, data)
 
@@ -1261,6 +1307,12 @@ class AmdGpuBackend(Backend):
         v.max_tdc_scale = min(vrmm.HARD_MAX_SCALE, float(c.get("max_tdc_scale", 1.3)))
         v.restore_on_stop = bool(c.get("restore_on_stop", True))
 
+    def close(self) -> None:
+        if self.clock_pin:
+            try:
+                self._unpin_clock(os.path.join(self.dev, "power_dpm_force_performance_level"))
+            except Exception:
+                pass
     def close(self) -> None:
         if self.vrm is not None:
             try:
@@ -1331,6 +1383,8 @@ class AmdGpuBackend(Backend):
             if t == "vf_measured_reset":
                 self.vf_measured.reset()
                 return True, "measured V/F curve cleared"
+            if t == "clock_pin":
+                return self._apply_clock_pin(meta, int(v))
             if t == "od_reset":
                 path = os.path.join(self.dev, "pp_od_clk_voltage")
                 self._write(path, "r\n")

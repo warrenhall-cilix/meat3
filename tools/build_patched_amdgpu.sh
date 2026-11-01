@@ -5,6 +5,8 @@
 #   bash tools/build_patched_amdgpu.sh              # build + install (asks first)
 #   bash tools/build_patched_amdgpu.sh --build-only # just build, install nothing
 #   bash tools/build_patched_amdgpu.sh --uninstall  # remove it, back to the stock amdgpu
+#   --with-clock-pin   also apply kmod/amdgpu-clock-pin (lets the debugfs clock pin go above the
+#                      firmware's game clock; meat3's "GFX clock pin" control uses it)
 #
 # EXPERIMENTAL. Only this kernel version is affected: any other installed kernel keeps the stock
 # driver and is your way back if the display doesn't come up. Without a custom_sku_<pci>.bin file the
@@ -12,6 +14,9 @@
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 PATCH="$REPO/kmod/amdgpu-custom-sku/meat3-custom-sku.patch"
+PATCH2="$REPO/kmod/amdgpu-clock-pin/meat3-clock-pin.patch"
+WITH_PIN=0
+for a in "$@"; do [[ "$a" == "--with-clock-pin" ]] && WITH_PIN=1; done
 KREL="$(uname -r)"
 KB="/lib/modules/$KREL/build"
 WORK="${XDG_CACHE_HOME:-$HOME/.cache}/meat3-amdgpu"
@@ -24,7 +29,7 @@ rebuild_initramfs() {
     else echo "!! rebuild your initramfs yourself if amdgpu is in it"; fi
 }
 
-if [[ "${1:-}" == "--uninstall" ]]; then
+if [[ " $* " == *" --uninstall "* ]]; then
     sudo rm -f "$DEST"/amdgpu.ko "$DEST"/amdgpu.ko.zst "$DEST"/amdgpu.ko.xz
     sudo depmod -a "$KREL"
     rebuild_initramfs
@@ -34,7 +39,7 @@ fi
 
 [[ -f "$KB/Makefile" && -f "$KB/.config" && -f "$KB/Module.symvers" ]] || {
     echo "kernel headers for $KREL not found ($KB); install them first"; exit 1; }
-if [[ "${1:-}" != "--build-only" ]]; then
+if [[ " $* " != *" --build-only "* ]]; then
     lock=$(cat /sys/kernel/security/lockdown 2>/dev/null || true)
     if [[ "$(cat /sys/module/module/parameters/sig_enforce 2>/dev/null)" == "Y" || "$lock" == *"[integrity]"* \
           || "$lock" == *"[confidentiality]"* ]]; then
@@ -56,11 +61,20 @@ if [[ ! -d "$SRC" ]]; then
     rm -f "$WORK/linux-$BASE.tar.xz"
 fi
 cd "$SRC"
-if patch -p1 -R --dry-run -s < "$PATCH" >/dev/null 2>&1; then
-    echo "== patch already applied"
-else
-    echo "== applying meat3 custom SKU patch"
-    patch -p1 < "$PATCH"
+apply_patch() {           # $1 = patch file, $2 = name
+    if patch -p1 -R --dry-run -s < "$1" >/dev/null 2>&1; then
+        echo "== $2 already applied"
+    else
+        echo "== applying $2"
+        patch -p1 < "$1"
+    fi
+}
+apply_patch "$PATCH" "meat3 custom SKU patch"
+if [[ $WITH_PIN == 1 ]]; then
+    apply_patch "$PATCH2" "meat3 clock-pin patch"
+elif patch -p1 -R --dry-run -s < "$PATCH2" >/dev/null 2>&1; then
+    echo "== removing the clock-pin patch (run with --with-clock-pin to keep it)"
+    patch -p1 -R < "$PATCH2"
 fi
 cp "$KB/.config" .config
 cp "$KB/Module.symvers" Module.symvers
@@ -80,7 +94,7 @@ KO=drivers/gpu/drm/amd/amdgpu/amdgpu.ko
 if command -v llvm-strip >/dev/null; then llvm-strip --strip-debug "$KO"; else strip --strip-debug "$KO"; fi
 grep -qa amdgpu_custom_sku "$KO" || { echo "built module lacks the patch?!"; exit 1; }
 echo "== built $SRC/$KO ($(du -h "$KO" | cut -f1))"
-[[ "${1:-}" == "--build-only" ]] && exit 0
+[[ " $* " == *" --build-only "* ]] && exit 0
 
 cat <<EOF
 
@@ -104,4 +118,8 @@ sudo depmod -a "$KREL"
 rebuild_initramfs
 echo
 echo "Installed. Reboot, then check:  sudo dmesg | grep 'custom SKU'   (nothing = no table file yet)"
+if [[ $WITH_PIN == 1 ]]; then
+    echo "Clock pin: after the reboot 'cat /sys/class/drm/card*/device/pp_dpm_sclk' shows a top level well above"
+    echo "the game clock, and meat3's 'GFX clock pin' control accepts clocks up to it."
+fi
 echo "Create a table with: sudo meat3-skutable --tdc-gfx 360 --write"

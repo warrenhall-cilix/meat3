@@ -441,6 +441,37 @@ class TestRx9070xtOverclock(TreeCase):
         self.assertEqual(self.writes(), [(DEV + "/power_dpm_force_performance_level", "manual\n"),
                                          (DEV + "/pp_power_profile_mode", "5\n")])
 
+    def test_clock_pin_control_appears_with_debugfs_and_unpins_via_perf_level(self):
+        self.assertNotIn("amdgpu0.oc.clock_pin", {c.id for c in self.be.controls()})    # no debugfs file: no control
+        dbg = os.path.join(self.root, "sys/kernel/debug/dri/0")
+        os.makedirs(dbg, exist_ok=True)
+        with open(os.path.join(dbg, "amdgpu_force_sclk"), "w") as fh:
+            fh.write("")
+        c = self.ctl("clock_pin")
+        self.assertTrue(c.available, c.hint)
+        self.assertEqual((c.min, c.max, c.value, c.unit), (0, 2970, 0, "MHz"))            # labelled DPM max = game clock
+        self.assertIn("game clock", c.hint)
+        self.assertFalse(self.be.apply("amdgpu0.oc.clock_pin", 3300)[0])                 # above the stock bound
+        self.assertFalse(self.be.apply("amdgpu0.oc.clock_pin", 100)[0])                  # below the DPM minimum
+        ok, msg = self.be.apply("amdgpu0.oc.clock_pin", 2900)
+        self.assertTrue(ok, msg)
+        self.assertEqual(self.writes(), [("/sys/kernel/debug/dri/0/amdgpu_force_sclk", "2900\n")])
+        self.assertEqual(self.ctl("clock_pin").value, 2900)
+        self.rec.calls.clear()
+        self.assertTrue(self.be.apply("amdgpu0.oc.perf_level", "manual")[0])            # pretend the user runs manual
+        with open(os.path.join(self.root, DEV.lstrip("/"), "power_dpm_force_performance_level"), "w") as fh:
+            fh.write("manual\n")
+        self.rec.calls.clear()
+        ok, msg = self.be.apply("amdgpu0.oc.clock_pin", 0)
+        self.assertTrue(ok, msg)
+        self.assertEqual(self.writes(), [(DEV + "/power_dpm_force_performance_level", "auto\n"),
+                                         (DEV + "/power_dpm_force_performance_level", "manual\n")])
+        self.assertEqual(self.ctl("clock_pin").value, 0)
+        self.assertTrue(self.be.apply("amdgpu0.oc.clock_pin", 2800)[0])                 # pinned again: close() unpins
+        self.rec.calls.clear()
+        self.be.close()
+        self.assertEqual(self.writes()[0], (DEV + "/power_dpm_force_performance_level", "auto\n"))
+
     def test_fan_writes(self):
         fc = DEV + "/gpu_od/fan_ctrl/"
         self.assertTrue(self.be.apply("amdgpu0.oc.od.fan_curve2_temp", 72)[0])
