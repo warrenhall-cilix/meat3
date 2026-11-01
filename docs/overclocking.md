@@ -278,6 +278,33 @@ How it works:
 
 `--compare` reports each CCD's mean, best and worst clock at that voltage.
 
+## Stress test button
+
+Overclock → CPU card → **Stress test** loads every thread and shows clock, Tctl, package power,
+current (TDC) and Vcore live, with peaks, while it runs. Pick a test and a duration, press Start.
+The result (PASS, FAIL with the reason, or stopped) also goes to the Results log at the bottom of the
+tab. The same tests run from a terminal as `meat3-stress --preset <name> [--seconds N]`.
+
+| Test | Tool | Default | What it is for |
+|---|---|---|---|
+| Quick | stress-ng matrix multiply, verified | 3 min | Clocks and cooling: does the clock hold, how hot does it get |
+| Mixed | stress-ng every CPU method, verified | 10 min | Broader instruction coverage |
+| AVX-512 | y-cruncher component tests, stop on error | 5 min | The heaviest current and the most vdroop; what finds a marginal manual OC |
+| Prime95 AVX2 | mprime small FFT, one worker per thread | 15 min | Sustained heat with checked results |
+| Prime95 AVX-512 | as above with AVX-512 | 15 min | |
+
+A run fails on a wrong result, a tool error, a non-zero exit, or a machine check / segfault / lockup
+in the kernel log during the run (read with `journalctl -k`; needs group `wheel`, `adm` or
+`systemd-journal`, otherwise the log is reported as not checked).
+
+A pass at the cooling-and-clock level says nothing about transients: a manual OC that holds 5 minutes
+of matrix multiply can still die on the first AVX-512 load step. Run the AVX-512 test before calling a
+voltage stable, and be at the machine: a fail there can be a hard lock that needs the reset button.
+Manual overclocks do not survive a crash; the box comes back at stock, so save a profile first.
+
+Needs `stress-ng` (`pacman -S stress-ng`); the AVX-512 and Prime95 tests need `y-cruncher` and
+`mprime-bin` from the AUR. A test whose tool is missing says so and keeps Start disabled.
+
 ## Guard trips
 
 When a safety guard fires (see `guards` in `/etc/meat3/config.json`), the daemon applies the guard's

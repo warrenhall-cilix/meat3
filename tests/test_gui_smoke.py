@@ -285,6 +285,26 @@ def _exercise(app, w, tmp, sock, osd_file, mock):
     _wait(app, lambda: not oc.rows["nv0.oc.core_offset"].dirty(), 5, "row clean")
     assert "150 MHz" in oc.rows["nv0.oc.core_offset"].current.text()
 
+    # --- stress test dialog from the CPU card: a fake tool stands in; the result lands in the Results log
+    dlg = oc.open_stress()
+    dlg.command_override = ["sh", "-c", "echo 'stress-ng: info: [1] failed: 0'; sleep 1.2"]
+    dlg._preset_changed()
+    assert dlg.preset_key == "quick" and dlg.seconds.value() == 180 and dlg.btn_start.isEnabled()
+    dlg.start()
+    assert dlg.run is not None and dlg.run.running and dlg.btn_stop.isEnabled() and not dlg.btn_start.isEnabled()
+    assert dlg.ids == {"clock": "cpu.clk_eff_avg", "Tctl": "cpu.temp.tctl", "power": "cpu.pwr.package",
+                       "current": "cpu.pwr.tdc", "vcore": "cpu.volt.vcore"}, dlg.ids
+    _wait(app, lambda: dlg.run.ok is not None and not dlg.timer.isActive(), 10, "stress result")
+    assert dlg.run.ok, dlg.run.why
+    assert dlg.run.samples and dlg.run.peaks.get("clock"), dlg.run.samples
+    assert "MHz" in dlg.rows["clock"][2].text() and "°C" in dlg.rows["Tctl"][1].text()
+    assert "PASS" in dlg.result.text() and "stress quick PASS" in oc.log.toPlainText()
+    assert dlg.btn_start.isEnabled() and not dlg.btn_stop.isEnabled()
+    dlg.grab().save(str(SHOTS / "stress-dark.png"))
+    dlg.close()
+    assert oc.open_stress() is dlg                 # one dialog per page
+    dlg.close()
+
     # V/F curve editor: select the 1200 mV point, drop it to 3000 MHz, flatten above, apply
     vf = oc.rows["nv0.oc.vf_curve"]
     plot = vf.curve.plot

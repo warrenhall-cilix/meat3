@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QGr
 from meat3.core.fmt import NONE_TEXT
 from meat3.gui.common import config_dir, device_badge, mono_font, theme
 from meat3.gui.curve import CurveEditor
+from meat3.gui.stress import StressDialog
 
 
 def profiles_dir() -> Path:
@@ -320,6 +321,7 @@ class OverclockPage(QWidget):
         self.boxes: dict[str, QFrame] = {}
         self.infos: dict[str, QLabel] = {}
         self.signature: tuple = ()
+        self.stress_dlg: Optional[StressDialog] = None
         self.confirm: Callable[[str, str], bool] = self._confirm_dialog
         self.ask_name: Callable[[str], Optional[str]] = self._ask_name
 
@@ -431,6 +433,12 @@ class OverclockPage(QWidget):
             head.addSpacing(6)
             head.addWidget(info)
             head.addStretch(1)
+            if kind == "cpu":
+                sb = QPushButton("Stress test")
+                sb.setToolTip("Load every thread with stress-ng, y-cruncher or Prime95 and watch clock, "
+                              "temperature, power, current and Vcore while it runs")
+                sb.clicked.connect(self.open_stress)
+                head.addWidget(sb)
             rb = QPushButton("Reset to stock")
             rb.setToolTip("Set every control of this device to its stock (default) value and apply")
             rb.clicked.connect(lambda _=False, d=dev: self.reset_device(d))
@@ -465,6 +473,17 @@ class OverclockPage(QWidget):
         if n_na:
             bits.append(f"{n_na} unavailable")
         return " · ".join(bits)
+
+    def open_stress(self) -> "StressDialog":
+        """The stress-test dialog (one per page); its result lands in the Results log."""
+        if self.stress_dlg is None:
+            self.stress_dlg = StressDialog(self.store, self)
+            self.stress_dlg.finished_run.connect(
+                lambda run: self._log(None if run.user_stop else bool(run.ok), run.summary()))
+        self.stress_dlg.show()
+        self.stress_dlg.raise_()
+        self.stress_dlg.activateWindow()
+        return self.stress_dlg
 
     def on_row_edited(self):
         n = sum(1 for r in self.rows.values() if r.dirty())
