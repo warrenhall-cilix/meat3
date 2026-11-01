@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -134,3 +135,49 @@ class TestSmufw(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class InitramfsPresets(unittest.TestCase):
+    """Liam's case: a stale linux60.preset (kernel removed) must not make the rebuild fail."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.presets = os.path.join(self.tmp, "mkinitcpio.d")
+        os.makedirs(self.presets)
+        self.live = os.path.join(self.tmp, "vmlinuz-7.2")
+        open(self.live, "wb").close()
+        with open(os.path.join(self.presets, "linux72.preset"), "w") as f:
+            f.write(f'ALL_config="/etc/mkinitcpio.conf"\nALL_kver="{self.live}"\nPRESETS=(\'default\')\n')
+        with open(os.path.join(self.presets, "linux60.preset"), "w") as f:
+            f.write(f"ALL_kver='{self.tmp}/vmlinuz-6.0'\n")   # not present
+        self.old_which = shutil.which
+        shutil.which = lambda name: "/usr/bin/mkinitcpio" if name == "mkinitcpio" else None
+
+    def tearDown(self):
+        shutil.which = self.old_which
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_presets_parsed(self):
+        self.assertEqual(smufw.mkinitcpio_presets(self.presets),
+                         [("linux60", f"{self.tmp}/vmlinuz-6.0"), ("linux72", self.live)])
+        self.assertEqual(smufw.mkinitcpio_presets(os.path.join(self.tmp, "nope")), [])
+
+    def test_stale_preset_skipped(self):
+        calls = []
+        def run(cmd):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0)
+        self.assertTrue(smufw.regen_initramfs(preset_dir=self.presets, run=run))
+        self.assertEqual(calls, [["mkinitcpio", "-p", "linux72"]])
+
+    def test_live_preset_failure_is_a_failure(self):
+        run = lambda cmd: subprocess.CompletedProcess(cmd, 1)
+        self.assertFalse(smufw.regen_initramfs(preset_dir=self.presets, run=run))
+
+    def test_all_stale_is_a_failure(self):
+        os.remove(self.live)
+        run = lambda cmd: self.fail("mkinitcpio must not run for a stale preset")
+        self.assertFalse(smufw.regen_initramfs(preset_dir=self.presets, run=run))
+
+    def test_dry_run(self):
+        self.assertTrue(smufw.regen_initramfs(dry=True, preset_dir=self.presets, run=lambda c: self.fail("ran")))

@@ -22,6 +22,7 @@ import glob
 import hashlib
 import lzma
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -149,6 +150,33 @@ def fetch(name: str, cache: str = CACHE, local: Optional[str] = None) -> str:
     return dst
 
 
+PRESET_DIR = "/etc/mkinitcpio.d"
+
+
+def mkinitcpio_presets(preset_dir: str = PRESET_DIR) -> list[tuple[str, Optional[str]]]:
+    """(preset name, kernel image path or None) for every *.preset, sorted by name.
+
+    The image path comes from ALL_kver when it is an absolute path; a bare version string
+    (or no ALL_kver) gives None, meaning "cannot check, just run it"."""
+    out = []
+    try:
+        names = sorted(n for n in os.listdir(preset_dir) if n.endswith(".preset"))
+    except OSError:
+        return out
+    for n in names:
+        kver = None
+        try:
+            with open(os.path.join(preset_dir, n)) as f:
+                for line in f:
+                    m = re.match(r'\s*ALL_kver=["\']?([^"\'\s]+)', line)
+                    if m:
+                        kver = m.group(1)
+        except OSError:
+            pass
+        out.append((n[:-len(".preset")], kver if kver and kver.startswith("/") else None))
+    return out
+
+
 def initramfs_cmd() -> Optional[list[str]]:
     for cmd in (["mkinitcpio", "-P"], ["dracut", "--regenerate-all", "--force"], ["update-initramfs", "-u", "-k", "all"]):
         if shutil.which(cmd[0]):
@@ -156,16 +184,44 @@ def initramfs_cmd() -> Optional[list[str]]:
     return None
 
 
-def regen_initramfs(dry: bool = False) -> bool:
+def regen_initramfs(dry: bool = False, preset_dir: str = PRESET_DIR, run=None) -> bool:
+    """Rebuild the initramfs. Returns True when every image that can be built was built.
+
+    mkinitcpio -P fails as a whole when one preset is stale (a preset left behind by a removed
+    kernel, whose vmlinuz is gone), even though the running kernel's image rebuilt fine. So on
+    mkinitcpio systems each preset is run on its own and presets whose kernel image is not
+    readable are skipped with a note."""
+    run = run or subprocess.run
     cmd = initramfs_cmd()
     if not cmd:
         print("!! no initramfs tool found (mkinitcpio / dracut / update-initramfs): regenerate it yourself")
         return False
-    print("regenerating initramfs:", " ".join(cmd))
-    if dry:
-        return True
-    r = subprocess.run(cmd)
-    return r.returncode == 0
+    if cmd[0] != "mkinitcpio":
+        print("regenerating initramfs:", " ".join(cmd))
+        return True if dry else run(cmd).returncode == 0
+    presets = mkinitcpio_presets(preset_dir)
+    if not presets:
+        print("regenerating initramfs:", " ".join(cmd))
+        return True if dry else run(cmd).returncode == 0
+    ok, built = True, 0
+    for name, image in presets:
+        if image and not os.access(image, os.R_OK):
+            print(f"skipping preset {name}: kernel image {image} is not present (stale preset from a removed kernel; "
+                  f"remove {os.path.join(preset_dir, name + '.preset')} if pacman does not own it)")
+            continue
+        print(f"regenerating initramfs: mkinitcpio -p {name}")
+        if dry:
+            built += 1
+            continue
+        if run(["mkinitcpio", "-p", name]).returncode == 0:
+            built += 1
+        else:
+            print(f"!! preset {name} failed")
+            ok = False
+    if built == 0:
+        print("!! no initramfs was built")
+        return False
+    return ok
 
 
 def backup_path(installed: str, cache: str = CACHE) -> str:
