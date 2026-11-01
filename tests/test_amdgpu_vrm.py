@@ -443,6 +443,60 @@ class TestVrm(Base):
         v.close()
         self.assertEqual(c1.regs[2][V.MPS_PG], 0x8000 | 0x400)                     # stock again on daemon stop
 
+    def test_half_applied_scale_still_restores_on_close(self):
+        # the vr2 PG write fails after vr1 was already scaled: the daemon must still put vr1 back on stop
+        c1, c2 = self.mp2868a_pair()
+        v = self.vrm(allow_writes=True)
+        bus = next(b for c in v.controllers if c.addr == 0x24 for b in [v._bus(c.bus_no)])
+        real_write_word, failed = bus.write_word, []
+
+        def flaky(addr, cmd, val, pec=False):
+            if addr == 0x24 and cmd == V.MPS_PG and not failed:
+                failed.append(1)
+                raise OSError(121, "Remote I/O error")
+            return real_write_word(addr, cmd, val, pec)
+        bus.write_word = flaky
+        ok, msg = v.set_rdna4_scale("tbp", 1.25)
+        self.assertFalse(ok)
+        self.assertIn("I2C error", msg)
+        self.assertEqual(c1.regs[2][V.MPS_PG], 0x8000 | int(0x400 / 1.25))        # vr1 did get scaled
+        self.assertEqual(c2.regs[2][V.MPS_PG], 0x8000 | 0x380)
+        self.assertTrue(v.gains_touched)
+        v.close()
+        self.assertEqual(c1.regs[2][V.MPS_PG], 0x8000 | 0x400)                     # restored
+
+    def test_bus_access_is_serialised_between_threads(self):
+        # poll thread (read_all / rdna4_gains) and apply threads share one PAGE register per controller:
+        # every gain write must land on page 2 and PAGE must be back at 0 when everything is done
+        import threading
+        c1, c2 = self.mp2868a_pair()
+        v = self.vrm(allow_writes=True)
+        self.assertIsInstance(v.lock, type(threading.RLock()))
+        stop = threading.Event()
+
+        def poller():
+            while not stop.is_set():
+                v.read_all(min_interval=0)
+                v.rdna4_gains()
+
+        def applier():
+            for k in (1.1, 1.2, 1.0, 1.3):
+                ok, msg = v.set_rdna4_scale("tbp", k)
+                self.assertTrue(ok, msg)
+        ts = [threading.Thread(target=poller) for _ in range(2)] + [threading.Thread(target=applier)]
+        for t in ts[2:]:
+            t.start()
+        for t in ts[:2]:
+            t.start()
+        ts[2].join()
+        stop.set()
+        for t in ts[:2]:
+            t.join()
+        for c in (c1, c2):
+            self.assertTrue(all(page == 2 for page, cmd, _ in c.writes if cmd == V.MPS_PG), c.writes)
+            self.assertEqual(c.page, 0)
+        self.assertEqual(c1.regs[2][V.MPS_PG], 0x8000 | int(0x400 / 1.3))
+
     def test_scale_refusals(self):
         self.mp2868a_pair()
         v = self.vrm()                                                             # writes disabled

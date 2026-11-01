@@ -39,6 +39,7 @@ import fcntl
 import glob
 import json
 import os
+import threading
 import time
 from typing import Optional
 
@@ -281,6 +282,16 @@ class Controller:
         self.mp2868a = False          # RDNA4 controller: page-2 gain registers are meaningful
 
 
+def _locked(fn):
+    """Every PMBus access is PAGE-select + transfer on a shared bus: the poll thread (read_all) and the
+    daemon's per-client apply threads must never interleave, or a write lands in the wrong page."""
+    def wrapper(self, *a, **kw):
+        with self.lock:
+            return fn(self, *a, **kw)
+    wrapper.__name__, wrapper.__doc__ = fn.__name__, fn.__doc__
+    return wrapper
+
+
 class VrmAccess:
     """Detects the GPU's VRM controllers and reads/writes them. `opener(bus) -> SMBus-like` for tests."""
 
@@ -307,6 +318,7 @@ class VrmAccess:
         self.factory: dict[str, int] = {}
         self.last: dict = {}
         self.last_t = 0.0
+        self.lock = threading.RLock()
         self._detect()
 
     # -------------------------------------------------------------- setup
@@ -388,6 +400,7 @@ class VrmAccess:
         c2 = next((c for c in self.controllers if c.mp2868a and c.addr == 0x24), None)
         return c1, c2
 
+    @_locked
     def _rd(self, c: Controller, page: int, cmd: int) -> int:
         bus = self._bus(c.bus_no)
         bus.write_byte(c.addr, PAGE, page)
@@ -396,6 +409,7 @@ class VrmAccess:
         finally:
             bus.write_byte(c.addr, PAGE, 0)
 
+    @_locked
     def _wr(self, c: Controller, page: int, cmd: int, val: int, what: str) -> None:
         """Write a word with PEC and verify the read-back (raises OSError on mismatch)."""
         bus = self._bus(c.bus_no)
@@ -409,6 +423,7 @@ class VrmAccess:
             raise OSError(0, f"{what}: read back 0x{back:04x}, wrote 0x{val & 0xFFFF:04x} (write-protected?)")
         self.last = {}
 
+    @_locked
     def _rd_vr_block(self, c: Controller) -> int:
         p1 = self._rd(c, 1, MPS_BACKUP2)
         p2 = self._rd(c, 1, MPS_BACKUP1) >> 11 & 0x1F
@@ -416,6 +431,7 @@ class VrmAccess:
         p4 = self._rd(c, 0, MPS_BACKUP1) >> 11 & 0x1F
         return join_vr_block(p1, p2, p3, p4)
 
+    @_locked
     def _wr_vr_block(self, c: Controller, block: int) -> None:
         p1, p2, p3, p4 = split_vr_block(block)
         self._wr(c, 1, MPS_BACKUP2, p1, "backup2")
@@ -426,6 +442,7 @@ class VrmAccess:
         r = self._rd(c, 0, MPS_BACKUP1) & ~(0x1F << 11)
         self._wr(c, 0, MPS_BACKUP1, r | p4 << 11, "backup1 p0")
 
+    @_locked
     def rdna4_gains(self) -> Optional[dict]:
         """RDNA4 (MP2868A) telemetry gains: current page-2 values, the stock values from the on-chip backup
         (rdna4p 68-bit format first, then the older 21-bit one) or from meat3's first-seen record, and the
@@ -516,6 +533,7 @@ class VrmAccess:
             raise OSError(0, "backup read-back failed CRC check")
         return fields
 
+    @_locked
     def set_rdna4_scale(self, kind: str, k: float) -> tuple[bool, str]:
         """kind 'tbp': PG on both controllers = stock / k (firmware power limit becomes PPT x k).
         kind 'tdc': CG1 and CG1_alt on the GFX controller = stock / k (TDC limit becomes 330 A x k).
@@ -537,6 +555,7 @@ class VrmAccess:
                            "that script and power-cycle before scaling")
         try:
             stock = self._ensure_rdna4_backup(c1, c2, g)
+            self.gains_touched = True      # before the first write: a failure half-way must still restore on stop
             writes = []
             if kind == "tbp":
                 for c, key, raw in ((c1, "pg_vr1", g["pg_vr1_raw"]), (c2, "pg_vr2", g["pg_vr2_raw"])):
@@ -552,10 +571,10 @@ class VrmAccess:
                 writes.append(f"CG1alt=0x{alt >> 4 & 0x7F:02x}")
         except OSError as e:
             return False, f"I2C error: {e.strerror or e}"
-        self.gains_touched = True
         self.last = {}
         return True, f"{kind.upper()} telemetry scale x{k:.2f} (stock/{k:.2f}): " + ", ".join(writes) + " (read back OK)"
 
+    @_locked
     def reset_rdna4_gains(self) -> tuple[bool, str]:
         ok, why = self.can_scale()
         if not ok:
@@ -577,6 +596,7 @@ class VrmAccess:
         self.last = {}
         return True, f"TBP/TDC telemetry gains back to stock ({g['stock_source']})"
 
+    @_locked
     def read_all(self, min_interval: float = 2.0) -> dict:
         """{(addr, page): {...}} cached for min_interval seconds (each read is an SMU I2C transfer)."""
         now = time.monotonic()
@@ -684,6 +704,7 @@ class VrmAccess:
                            "offset encoding unknown, refusing to write")
         return True, ""
 
+    @_locked
     def set_offset_mv(self, addr: int, page: int, mv: float) -> tuple[bool, str]:
         ok, why = self.can_write(addr, page)
         if not ok:
@@ -702,6 +723,7 @@ class VrmAccess:
         raw = int(round(mv / 1000 / 2.0 ** e)) & 0xFFFF
         return self._write_offset(c, page, raw, f"{mv:+.1f} mV")
 
+    @_locked
     def set_current_scale(self, addr: int, page: int, k: float) -> tuple[bool, str]:
         """Under-report current by k (raises the firmware's effective current limit k times)."""
         ok, why = self.can_write(addr, page, need_linear_vout=False, what="gain")
@@ -716,6 +738,7 @@ class VrmAccess:
         raw = fac if k == 1.0 else to_linear11(linear11(fac) * k, l11_exp(fac))
         return self._write_word(c, page, IOUT_CAL_GAIN, raw, f"IOUT_CAL_GAIN x{k:.2f}")
 
+    @_locked
     def set_droop_mohm(self, addr: int, page: int, mohm: float) -> tuple[bool, str]:
         ok, why = self.can_write(addr, page, need_linear_vout=False, what="llc")
         if not ok:
@@ -728,6 +751,7 @@ class VrmAccess:
             return False, f"load line must be 0..{2 * linear11(fac):.3f} mOhm (2x factory)"
         return self._write_word(c, page, VOUT_DROOP, to_linear11(mohm, l11_exp(fac)), f"VOUT_DROOP {mohm:.3f} mOhm")
 
+    @_locked
     def reset(self, addr: int, page: int) -> tuple[bool, str]:
         """Restore factory offset, current-sense gain and load line (whatever was ever read)."""
         if not self.allow_writes:
@@ -749,6 +773,7 @@ class VrmAccess:
     def _write_offset(self, c: Controller, page: int, raw: int, what: str) -> tuple[bool, str]:
         return self._write_word(c, page, VOUT_CAL_OFFSET, raw, f"VOUT_CAL_OFFSET {what}")
 
+    @_locked
     def _write_word(self, c: Controller, page: int, cmd: int, raw: int, what: str) -> tuple[bool, str]:
         bus = self._bus(c.bus_no)
         try:
@@ -763,6 +788,7 @@ class VrmAccess:
             return False, f"read back 0x{back:04x}, wrote 0x{raw:04x} (write-protected?)"
         return True, f"0x{c.addr:02x}/p{page} {what} (read back OK)"
 
+    @_locked
     def close(self):
         if self.gains_touched and self.restore_on_stop:
             try:
