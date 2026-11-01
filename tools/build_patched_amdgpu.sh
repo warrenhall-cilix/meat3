@@ -86,11 +86,25 @@ if ! command -v bc >/dev/null; then          # only needed for timeconst.h; reus
     chmod +x "$WORK/bin/bc"
     export PATH="$WORK/bin:$PATH"
 fi
+# The module's version magic must equal `uname -r` exactly. Distros append their package release on the
+# make command line (Manjaro: 7.2.9-1-MANJARO while the config only says -MANJARO), so rebuild the string
+# from the running kernel: everything after the numeric version goes in LOCALVERSION, the config's own
+# LOCALVERSION is emptied and LOCALVERSION_AUTO (the "+" suffix) switched off.
+LV="${KREL#"$BASE"}"
+scripts/config --set-str LOCALVERSION "" --disable LOCALVERSION_AUTO
+MAKEARGS+=("LOCALVERSION=$LV")
 echo "== building amdgpu for $KREL (a few minutes)"
 make "${MAKEARGS[@]}" olddefconfig >/dev/null
 make "${MAKEARGS[@]}" -j"$(nproc)" modules_prepare >/dev/null
 make "${MAKEARGS[@]}" -j"$(nproc)" M=drivers/gpu/drm/amd/amdgpu modules
 KO=drivers/gpu/drm/amd/amdgpu/amdgpu.ko
+VM="$(modinfo -F vermagic "$KO" 2>/dev/null || true)"
+if [[ "${VM%% *}" != "$KREL" ]]; then
+    echo "!! built module is stamped '${VM%% *}' but the running kernel is '$KREL'; the kernel would refuse it"
+    echo "   (Exec format error). Not installing. Send this line along with 'uname -r' and the contents of"
+    echo "   $KB/include/config/kernel.release"
+    exit 1
+fi
 if command -v llvm-strip >/dev/null; then llvm-strip --strip-debug "$KO"; else strip --strip-debug "$KO"; fi
 grep -qa amdgpu_custom_sku "$KO" || { echo "built module lacks the patch?!"; exit 1; }
 echo "== built $SRC/$KO ($(du -h "$KO" | cut -f1))"
