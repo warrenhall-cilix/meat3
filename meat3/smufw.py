@@ -25,6 +25,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import sys
 import urllib.error
 import urllib.request
@@ -65,10 +66,27 @@ def decompress(path: str) -> bytes:
         return f.read()
 
 
+def zstd_kernel_loadable(blob: bytes) -> bool:
+    """The kernel's firmware loader (fw_decompress_zstd) returns -EINVAL unless the zstd frame header carries
+    the decompressed size: Frame_Header_Descriptor FCS flag (bits 7:6) non-zero or Single_Segment (bit 5)."""
+    if len(blob) < 6 or blob[:4] != b"\x28\xb5\x2f\xfd":
+        return False
+    fhd = blob[4]
+    return (fhd >> 6) != 0 or (fhd >> 5) & 1 == 1
+
+
 def compress_like(data: bytes, path: str) -> bytes:
-    """Encode `data` the way the file at `path` is stored (.zst / .xz / plain)."""
+    """Encode `data` the way the file at `path` is stored (.zst / .xz / plain), in a form the kernel accepts."""
     if path.endswith(".zst"):
-        return subprocess.run(["zstd", "-q", "-19", "-c"], input=data, capture_output=True, check=True).stdout
+        # from a FILE, not stdin: zstd only writes the frame content size when it knows the input size, and
+        # the kernel refuses a .zst firmware without it ("Direct firmware load ... failed with error -22")
+        with tempfile.NamedTemporaryFile(suffix=".bin") as t:
+            t.write(data)
+            t.flush()
+            blob = subprocess.run(["zstd", "-q", "-19", "-c", t.name], capture_output=True, check=True).stdout
+        if not zstd_kernel_loadable(blob):
+            raise RuntimeError("zstd output lacks the frame content size; the kernel would refuse it (not installed)")
+        return blob
     if path.endswith(".xz"):
         return lzma.compress(data, format=lzma.FORMAT_XZ, check=lzma.CHECK_CRC32)
     return data
@@ -246,6 +264,11 @@ def status(root: str = "/", cache: str = CACHE) -> int:
             rc = 1
             continue
         try:
+            if inst.endswith(".zst"):
+                with open(inst, "rb") as f:
+                    if not zstd_kernel_loadable(f.read(6)):
+                        print(f"   !! {inst} has no frame content size: the kernel refuses it at boot (amdgpu "
+                              f"'Direct firmware load ... error -22'). Run `meat3-smufw --restore` or re-pin.")
             h = sha256(decompress(inst))
         except RuntimeError as e:
             print(f"   {e}")

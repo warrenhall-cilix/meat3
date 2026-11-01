@@ -161,6 +161,10 @@ not run. What the pin costs is any SMU fix released after June 2025 while it is 
 systems a pacman hook re-pins the file after `linux-firmware` upgrades; elsewhere `meat3-smufw` reports
 when a package update has replaced it. Reboot after `--pin` or `--restore`.
 
+If the desktop comes back on one screen at 60 Hz after the reboot, amdgpu refused to start: check
+`dmesg | grep smu_14` for `Direct firmware load ... failed`, run `sudo meat3-smufw --restore` and reboot.
+The restore does not need a working GPU. Nothing is flashed, so this is always recoverable.
+
 ## `meat3-fasttiming`: AMD "Fast Timing" memory timings (experimental)
 
 Adrenalin's memory "Fast Timing" is not an SMU setting, which is why Linux has no knob for it. The

@@ -68,6 +68,18 @@ class TestSmufw(unittest.TestCase):
         self.assertEqual(smufw.restore(self.root, self.cache, no_initramfs=True), 0)
         self.assertEqual(open(self.inst, "rb").read(), DIST)
 
+    def test_zst_output_carries_content_size_for_the_kernel(self):
+        # Liam's 9070 XT, 2026-11-01: a .zst written from stdin had no frame content size and amdgpu failed
+        # early_init with -22 at boot; the desktop came up on the basic framebuffer
+        if not self.old_which("zstd"):
+            self.skipTest("zstd not installed")
+        blob = smufw.compress_like(GOOD, "x.zst")
+        self.assertTrue(smufw.zstd_kernel_loadable(blob), hex(blob[4]))
+        piped = subprocess.run(["zstd", "-q", "-c"], input=GOOD, capture_output=True, check=True).stdout
+        self.assertFalse(smufw.zstd_kernel_loadable(piped))              # what the old code produced
+        self.assertFalse(smufw.zstd_kernel_loadable(b"not zstd at all"))
+        self.assertEqual(subprocess.run(["zstd", "-dc"], input=blob, capture_output=True, check=True).stdout, GOOD)
+
     def test_pin_handles_zst_files(self):
         if not self.old_which("zstd"):
             self.skipTest("zstd not installed")
