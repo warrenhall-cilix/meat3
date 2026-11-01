@@ -816,11 +816,27 @@ class AmdGpuBackend(Backend):
         return ps
 
     def _force_sclk_path(self) -> Optional[str]:
-        """/sys/kernel/debug/dri/<minor>/amdgpu_force_sclk (stock debugfs; needs root and a mounted debugfs)."""
-        m = re.search(r"card(\d+)", os.path.realpath(self.dev) if self.io.root == "/" else self.dev)
-        if not m:
-            return None
-        return self.io.p(f"/sys/kernel/debug/dri/{m.group(1)}/amdgpu_force_sclk")
+        """/sys/kernel/debug/dri/<minor>/amdgpu_force_sclk (stock debugfs; needs root and a mounted debugfs).
+        The minor comes from the unresolved /sys/class/drm/card<N>/device path (its realpath is the PCI
+        device and carries no card number) or from the device's drm/ directory; newer kernels also name the
+        debugfs directory after the PCI address, so that is tried too."""
+        names = []
+        m = re.search(r"card(\d+)", self.dev)
+        if m:
+            names.append(m.group(1))
+        try:
+            for ent in sorted(os.listdir(os.path.join(self.dev, "drm"))):
+                m = re.fullmatch(r"card(\d+)", ent)
+                if m and m.group(1) not in names:
+                    names.append(m.group(1))
+        except OSError:
+            pass
+        names.append(os.path.basename(os.path.realpath(self.dev)))      # e.g. 0000:03:00.0
+        for n in names:
+            cand = self.io.p(f"/sys/kernel/debug/dri/{n}/amdgpu_force_sclk")
+            if os.path.exists(cand):
+                return cand
+        return self.io.p(f"/sys/kernel/debug/dri/{names[0]}/amdgpu_force_sclk") if names else None
 
     def _perf_level(self) -> Optional[str]:
         t = self._r("power_dpm_force_performance_level")

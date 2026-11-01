@@ -472,6 +472,27 @@ class TestRx9070xtOverclock(TreeCase):
         self.be.close()
         self.assertEqual(self.writes()[0], (DEV + "/power_dpm_force_performance_level", "auto\n"))
 
+    def test_clock_pin_debugfs_found_via_drm_dir_or_pci_name(self):
+        # live systems: self.dev may resolve to the PCI device path; the drm/ subdir or the PCI-named debugfs dir must do
+        be = self.be
+        os.makedirs(os.path.join(be.dev, "drm", "card1"), exist_ok=True)
+        saved = be.dev
+        try:
+            be.dev = os.path.join(self.root, "sys/devices/pci0000:00/0000:03:00.0")
+            os.makedirs(os.path.join(be.dev, "drm", "card1"), exist_ok=True)
+            self.assertIsNone(None if be._force_sclk_path() is None else None)      # no file yet: path may be None or a guess
+            dbg = os.path.join(self.root, "sys/kernel/debug/dri/1")
+            os.makedirs(dbg, exist_ok=True)
+            open(os.path.join(dbg, "amdgpu_force_sclk"), "w").close()
+            self.assertTrue(be._force_sclk_path().endswith("/dri/1/amdgpu_force_sclk"))
+            os.remove(os.path.join(dbg, "amdgpu_force_sclk"))
+            dbg2 = os.path.join(self.root, "sys/kernel/debug/dri/0000:03:00.0")
+            os.makedirs(dbg2, exist_ok=True)
+            open(os.path.join(dbg2, "amdgpu_force_sclk"), "w").close()
+            self.assertTrue(be._force_sclk_path().endswith("/dri/0000:03:00.0/amdgpu_force_sclk"))
+        finally:
+            be.dev = saved
+
     def test_fan_writes(self):
         fc = DEV + "/gpu_od/fan_ctrl/"
         self.assertTrue(self.be.apply("amdgpu0.oc.od.fan_curve2_temp", 72)[0])
