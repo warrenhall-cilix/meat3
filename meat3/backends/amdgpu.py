@@ -1115,7 +1115,7 @@ class AmdGpuBackend(Backend):
                               "x", 3, hb + f" CG1 0x{g['cg1_vr1']:03x}"))
             out.append(Sensor(f"{P}.vrm.tdc_alt_scale", G, "TDC alternate scale", g.get("tdc_alt_scale"), "x", 3,
                               hb + f" CG1 alt 0x{g['cg1_alt_vr1']:02x}"))
-            out.append(Sensor(f"{P}.vrm.idroop_raw", G, "GFX IDROOP gain (raw)", float(g["idroop_raw"] & 0xFF), "", 0,
+            out.append(Sensor(f"{P}.vrm.idroop_raw", G, "GFX load line: IDROOP gain", float(g["idroop_raw"] & 0xFF), "", 0,
                               "MP2868A page-2 register 0x06 low byte (load line); scripts call it IDROOP"))
             if tbp and abs(tbp - 1) > 0.005 and pw.get("real_w") is not None:
                 out.append(Sensor(f"{P}.vrm.real_power_scaled", G, "Real power (VR, gain-corrected)",
@@ -1252,8 +1252,17 @@ class AmdGpuBackend(Backend):
                        min=1.0, max=v.max_tdc_scale, step=0.05, unit="x", default=1.0, danger=2, available=ok,
                        hint=(why + ". " if why else "") + f"TDC limit x scale (current gains CG1 and CG1 alt on the "
                        f"GFX controller; stock from {src}). " + warn),
-               Control(f"{P}.vrm.gains_reset", G, "Restore stock TBP/TDC gains", "action", danger=1,
-                       available=bool(ok), hint=why or "writes the backed-up stock gains back to both controllers")]
+               Control(f"{P}.vrm.gfx_droop", G, "GFX load line (IDROOP gain)", "int", g.get("idroop"),
+                       min=g.get("idroop_min", vrmm.IDROOP_MIN_ABS), max=vrmm.IDROOP_MAX, step=1, unit="",
+                       default=(g.get("stock_values") or {}).get("idroop"), danger=2, available=ok,
+                       hint=(why + ". " if why else "") +
+                       f"MP2868A IDROOP gain on the GFX regulator (page 2 register 0x06, stock {(g.get('stock_values') or {}).get('idroop')}). "
+                       "Lower = less voltage sag under load, so the clock holds up in heavy scenes without raising the "
+                       "light-load voltage; higher = more sag. Each step down adds real voltage only when current is high "
+                       "and raises transient overshoot when load drops. Floor: half of stock. Volatile; restored with the "
+                       "stock gains when meat3d stops."),
+               Control(f"{P}.vrm.gains_reset", G, "Restore stock TBP/TDC gains and droop", "action", danger=1,
+                       available=bool(ok), hint=why or "writes the backed-up stock gains and IDROOP back to the controllers")]
         return out
 
     def _vrm_apply(self, control_id: str, value: Any) -> tuple[bool, str]:
@@ -1267,6 +1276,10 @@ class AmdGpuBackend(Backend):
             return v.set_rdna4_scale(tail[:3], float(value))
         if tail == "gains_reset":
             return v.reset_rdna4_gains()
+        if tail == "gfx_droop":
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return False, "expected a number"
+            return v.set_rdna4_droop(int(value))
         _, _, key, what = control_id.split(".", 3)
         rail = next(((a, p) for (a, p), (k, _l) in vrmm.RAILS.items() if k == key), None)
         if rail is None:

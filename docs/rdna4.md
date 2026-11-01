@@ -146,6 +146,15 @@ writes but keeps the corrected picture:
 * meat3d writes the stock gains back when it stops (`amdgpu_vrm.restore_on_stop`); a power cycle also
   clears them, a warm reboot does not.
 
+**GFX load line (`vrm.gfx_droop`).** The GFX regulator lets its output sag with current (its load line);
+on the first card the firmware commanded 1.15 V in its top zone while the regulator delivered 1.03 to
+1.12 V at 200 to 300 A, which is why heavy scenes lost 300 MHz with no limiter flagged but Vmax. The
+IDROOP gain (page 2 register 0x06, stock 51 on that card) sets how much it sags: lower holds more
+voltage under load and only under load, so the light-scene voltage and the firmware's power estimate
+move far less than with a flat regulator offset. meat3 bounds it at half of stock and never below 26,
+backs the stock value up on the chip with the gains, and restores it when the daemon stops. Step down
+in fives with a 30-second log each time; less droop also means more overshoot when load drops.
+
 Prerequisites, in order:
 
 1. `amdgpu_vrm.allow_writes: true` in `/etc/meat3/config.json` (the switch that also gates VID offsets).

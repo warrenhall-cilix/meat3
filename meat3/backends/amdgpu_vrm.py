@@ -78,6 +78,12 @@ RDNA4P_FIELDS = [("pg_vr1", 11), ("cg1_vr1", 11), ("pg_vr2", 11), ("gfx_vid", 1)
                  ("vddci_vid", 1), ("vram_vid", 1), ("trim_vr1", 7), ("cg1_alt_vr1", 7), ("droop_vr1", 8)]
 HARD_MAX_SCALE = 1.5          # the control range never exceeds this whatever the config says
 MP2868A_MODEL_BYTE = 0x68
+# MP2868A page-2 IDROOP gain (register 0x06, low byte): the GFX rail's load line. Lower = less droop = more
+# voltage held under load (fpsflow: "lower = less droop (more aggressive), higher = more droop (safer)",
+# their bounds 26..255). meat3 never goes below IDROOP_MIN_ABS or below IDROOP_MIN_FRACTION of stock.
+IDROOP_MIN_ABS = 26
+IDROOP_MIN_FRACTION = 0.5
+IDROOP_MAX = 255
 # First real RX 9070 XT (ASUS, PMFW 0x684a00, 2026-11-01), MP2868A at 0x22/0x24, two game samples against
 # the firmware's metrics table: temperatures match the firmware's VR temperatures exactly; SoC and memory
 # rail currents agree within 10 %; the GFX loop's READ_IOUT read 120 A then 306 A while the firmware's
@@ -481,6 +487,7 @@ class VrmAccess:
             out["error"] = e.strerror or str(e)
             return out
         out["pg_vr1"] = out["pg_vr1_raw"] & 0x7FF
+        out["idroop"] = out["idroop_raw"] & 0xFF
         out["cg1_vr1"] = out["cg1_vr1_raw"] & 0x7FF
         out["cg1_alt_vr1"] = out["cg1_alt_vr1_raw"] >> 4 & 0x7F
         if "pg_vr2_raw" in out:
@@ -498,14 +505,19 @@ class VrmAccess:
             stock = {k: self._factory(c1, MPS_PAGE2, "/" + k, out[k]) for k in ("pg_vr1", "cg1_vr1", "cg1_alt_vr1")}
             if "pg_vr2" in out:
                 stock["pg_vr2"] = self._factory(c2, MPS_PAGE2, "/pg_vr2", out["pg_vr2"])
+            stock["idroop"] = self._factory(c1, MPS_PAGE2, "/idroop", out["idroop"])
             src = "meat3 first-seen"
         else:
-            for k in ("pg_vr1", "cg1_vr1", "cg1_alt_vr1", "pg_vr2"):
+            # the rdna4p backup carries the stock droop (legacy 21-bit one does not: fall back to first-seen)
+            stock["idroop"] = stock["droop_vr1"] if stock.get("droop_vr1") is not None else \
+                self._factory(c1, MPS_PAGE2, "/idroop", out["idroop"])
+            for k in ("pg_vr1", "cg1_vr1", "cg1_alt_vr1", "pg_vr2", "idroop"):
                 if k in stock:                      # keep meat3's copy in step with the chip's backup
                     self.factory[self._key(c1 if k != "pg_vr2" else c2, MPS_PAGE2) + "/" + k] = stock[k]
             self._save_factory()
         out["stock_source"] = src
-        out["stock_values"] = {k: stock.get(k) for k in ("pg_vr1", "cg1_vr1", "cg1_alt_vr1", "pg_vr2")}
+        out["stock_values"] = {k: stock.get(k) for k in ("pg_vr1", "cg1_vr1", "cg1_alt_vr1", "pg_vr2", "idroop")}
+        out["idroop_min"] = max(IDROOP_MIN_ABS, int(round((stock.get("idroop") or out["idroop"]) * IDROOP_MIN_FRACTION)))
         div = lambda s_, cur: (s_ / cur) if s_ and cur else None
         out["tbp_scale"] = div(stock.get("pg_vr1"), out["pg_vr1"])
         out["tdc_scale"] = div(stock.get("cg1_vr1"), out["cg1_vr1"])
@@ -583,6 +595,37 @@ class VrmAccess:
         return True, f"{kind.upper()} telemetry scale x{k:.2f} (stock/{k:.2f}): " + ", ".join(writes) + " (read back OK)"
 
     @_locked
+    def set_rdna4_droop(self, value: int) -> tuple[bool, str]:
+        """GFX load line: IDROOP gain low byte on the GFX controller. Lower holds more voltage under load."""
+        ok, why = self.can_scale()
+        if not ok:
+            return False, why
+        c1, c2 = self._rdna4_pair()
+        g = self.rdna4_gains()
+        if not g or "error" in g:
+            return False, f"cannot read gains: {(g or {}).get('error', 'no controller')}"
+        if g.get("legacy_power_offset"):
+            return False, "an older fpsflow script left a power offset in page-1 register 0x10; remove it first"
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            return False, "expected a whole number"
+        lo = g["idroop_min"]
+        if not lo <= value <= IDROOP_MAX:
+            return False, f"IDROOP must be {lo}..{IDROOP_MAX} (stock {g['stock_values']['idroop']}; not below " \
+                          f"{int(IDROOP_MIN_FRACTION * 100)} % of stock or {IDROOP_MIN_ABS})"
+        try:
+            self._ensure_rdna4_backup(c1, c2, g)       # stores the stock droop before the first change
+            self.gains_touched = True
+            raw = (g["idroop_raw"] & 0xFF00) | (value & 0xFF)
+            self._wr(c1, MPS_PAGE2, MPS_IDROOP_GAIN, raw, "IDROOP")
+        except OSError as e:
+            return False, f"I2C error: {e.strerror or e}"
+        self.last = {}
+        st = g["stock_values"]["idroop"]
+        return True, f"GFX IDROOP gain {value} (stock {st}: {'less' if st and value < st else 'more' if st and value > st else 'stock'} droop) (read back OK)"
+
+    @_locked
     def reset_rdna4_gains(self) -> tuple[bool, str]:
         ok, why = self.can_scale()
         if not ok:
@@ -598,6 +641,8 @@ class VrmAccess:
             self._wr(c1, MPS_PAGE2, MPS_CG1_ALT, (g["cg1_alt_vr1_raw"] & ~0x7F0) | st["cg1_alt_vr1"] << 4, "CG1 alt")
             if "pg_vr2_raw" in g and st.get("pg_vr2") is not None:
                 self._wr(c2, MPS_PAGE2, MPS_PG, (g["pg_vr2_raw"] & ~0x7FF) | st["pg_vr2"], "PG vr2")
+            if st.get("idroop") is not None and (g["idroop_raw"] & 0xFF) != st["idroop"]:
+                self._wr(c1, MPS_PAGE2, MPS_IDROOP_GAIN, (g["idroop_raw"] & 0xFF00) | st["idroop"], "IDROOP")
         except OSError as e:
             return False, f"I2C error: {e.strerror or e}"
         self.gains_touched = False

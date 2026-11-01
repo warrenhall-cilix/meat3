@@ -518,6 +518,31 @@ class TestVrm(Base):
         self.assertAlmostEqual(p["real_w"], p["rails_w"] / V.VRM_EFFICIENCY, delta=1)   # not the IIN figure
         self.assertIsNotNone(p["input_w"])                                                 # still reported
 
+    def test_droop_gain_bounds_backup_and_reset(self):
+        c1, c2 = self.mp2868a_pair()                     # IDROOP register 0x1234: stock gain 0x34 = 52, upper byte kept
+        v = self.vrm(allow_writes=True)
+        g = v.rdna4_gains()
+        self.assertEqual((g["idroop"], g["stock_values"]["idroop"], g["idroop_min"]), (0x34, 0x34, 26))
+        self.assertFalse(v.set_rdna4_droop(25)[0])                                   # below the floor
+        self.assertFalse(v.set_rdna4_droop(256)[0])
+        self.assertFalse(self.vrm().set_rdna4_droop(40)[0])                          # writes disabled
+        ok, msg = v.set_rdna4_droop(40)
+        self.assertTrue(ok, msg)
+        self.assertIn("less droop", msg)
+        self.assertEqual(c1.regs[2][V.MPS_IDROOP_GAIN], 0x1228)                      # upper byte preserved
+        self.assertTrue(v.gains_touched)
+        g = v.rdna4_gains()
+        self.assertEqual(g["stock_source"], "scripts backup (rdna4p)")                # backup written before the change
+        self.assertEqual((g["idroop"], g["stock_values"]["idroop"]), (40, 0x34))      # stock from the on-chip backup
+        self.assertEqual(g["stock"]["droop_vr1"], 0x34)
+        ok, msg = v.reset_rdna4_gains()
+        self.assertTrue(ok, msg)
+        self.assertEqual(c1.regs[2][V.MPS_IDROOP_GAIN], 0x1234)
+        self.assertFalse(v.gains_touched)
+        v.set_rdna4_droop(30)
+        v.close()                                                                     # daemon stop restores it too
+        self.assertEqual(c1.regs[2][V.MPS_IDROOP_GAIN], 0x1234)
+
     def test_scale_refusals(self):
         self.mp2868a_pair()
         v = self.vrm()                                                             # writes disabled
