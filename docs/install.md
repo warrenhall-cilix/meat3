@@ -36,6 +36,25 @@ It does the following:
 - **Web token:** creates a login token for the web UI. The web UI itself stays off unless you ask
   for it.
 
+### Arch package and the meat³ repository
+
+Releases are tagged `vX.Y.Z` and built into an Arch package by GitHub Actions, which also keeps a
+pacman repository. To install and update through pacman instead of git, add to `/etc/pacman.conf`:
+
+```ini
+[meat3]
+SigLevel = Optional TrustAll
+Server = https://warrenhall-cilix.github.io/meat3/arch
+```
+
+then `sudo pacman -Sy meat3`. The package puts the program in `/usr/lib/meat3`, the commands in
+`/usr/bin`, the units in `/usr/lib/systemd/system` and the config in `/etc/meat3/config.json` (kept
+on upgrade). It creates the `meat3` group; add yourself to it, log out and in, then
+`systemctl enable --now meat3d`. Updates arrive with `pacman -Syu`; the in-app update button is for
+git installs and stays hidden for the package.
+
+The package is not signed yet, hence `SigLevel = Optional TrustAll`; a signing key is on the list.
+
 ### Installer options
 
 | Option | Effect |
@@ -64,9 +83,13 @@ These add data. meat³ works without them and shows the affected rows as unavail
 
 ## Updating
 
+**Package install:** `sudo pacman -Syu`. Everything below is for git installs.
+
 Use any of these:
 - **Desktop app:** Help → Check for updates. A button in the status bar also appears when
-  updates are available.
+  updates are available; it names the release (`v0.2.1 available`) when the new commits include
+  a tagged release, and counts commits otherwise. The daemon checks GitHub every six hours and the
+  app every minute while open.
 - **TUI:** press `u` in `meat3-tui`.
 - **Terminal:** run `~/meat3/packaging/update.sh`, or the update script in your own checkout.
 

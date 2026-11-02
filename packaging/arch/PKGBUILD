@@ -1,0 +1,56 @@
+# Maintainer: Warren Hall <warren@cilix.co.uk>
+# Built by .github/workflows/release.yml on every v* tag into the meat3 pacman repository; `makepkg -si`
+# from this directory also works on any Arch-based system with the sources checked out two levels up.
+pkgname=meat3
+pkgver=0.2.0
+pkgrel=1
+pkgdesc="Hardware monitor, on-screen display and overclocking tool for Linux (HWiNFO-style)"
+arch=('any')
+url="https://github.com/warrenhall-cilix/meat3"
+license=('custom')
+depends=('python' 'python-evdev' 'python-psutil' 'lm_sensors' 'i2c-tools' 'smartmontools')
+optdepends=('pyside6: desktop app (meat3)'
+            'mangohud: in-game OSD'
+            'python-nvidia-ml-py: NVIDIA GPUs'
+            'ryzen_smu-dkms-git: AMD CPU Infinity Fabric / SMU telemetry and overclocking'
+            'dkms: meat3_smu kernel module for RDNA4 hidden metrics'
+            'zstd: SMU firmware pin on zstd-compressed firmware')
+backup=('etc/meat3/config.json')
+install=meat3.install
+source=()
+sha256sums=()
+
+_srcroot="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+pkgver() {
+    # the tag the workflow builds from, or the checkout's describe when run by hand
+    local v
+    v="$(git -C "$_srcroot" describe --tags --match 'v*' 2>/dev/null | sed 's/^v//; s/-/+/; s/-/./g')"
+    echo "${v:-0.2.0}"
+}
+
+package() {
+    local lib="$pkgdir/usr/lib/meat3"
+    install -d "$lib" "$pkgdir/usr/bin" "$pkgdir/usr/lib/systemd/system" "$pkgdir/etc/meat3" \
+               "$pkgdir/usr/share/applications" "$pkgdir/usr/share/doc/meat3" "$pkgdir/usr/src/meat3_smu-0.1" \
+               "$pkgdir/usr/lib/modules-load.d" "$pkgdir/usr/share/licenses/meat3"
+    cp -r "$_srcroot/meat3" "$lib/"
+    find "$lib" -name __pycache__ -prune -exec rm -rf {} +
+    echo "v$pkgver" > "$lib/VERSION"
+    # launchers: one per entry point, run from the library directory like the git install's wrappers
+    local m
+    for m in daemon:meat3d gui:meat3 tui:meat3-tui web:meat3-web cotune:meat3-cotune gputune:meat3-gputune \
+             skutable:meat3-skutable smufw:meat3-smufw fasttiming:meat3-fasttiming stresstest:meat3-stress cpubin:meat3-bin; do
+        printf '#!/bin/sh\ncd /usr/lib/meat3 && exec /usr/bin/python3 -m meat3.%s "$@"\n' "${m%%:*}" > "$pkgdir/usr/bin/${m##*:}"
+        chmod 755 "$pkgdir/usr/bin/${m##*:}"
+    done
+    install -m644 "$_srcroot/packaging/meat3d.service" "$_srcroot/packaging/meat3-web.service" "$pkgdir/usr/lib/systemd/system/"
+    sed -i 's|/usr/local/bin/|/usr/bin/|' "$pkgdir/usr/lib/systemd/system/"*.service
+    install -m644 "$_srcroot/packaging/config.default.json" "$pkgdir/etc/meat3/config.json"
+    install -m644 "$_srcroot/packaging/meat3.desktop" "$pkgdir/usr/share/applications/meat3.desktop"
+    install -m644 "$_srcroot/README.md" "$_srcroot/PROTOCOL.md" "$pkgdir/usr/share/doc/meat3/"
+    cp -r "$_srcroot/docs" "$pkgdir/usr/share/doc/meat3/"
+    cp -r "$_srcroot/kmod/meat3_smu/." "$pkgdir/usr/src/meat3_smu-0.1/"
+    printf 'i2c-dev\nmsr\n' > "$pkgdir/usr/lib/modules-load.d/meat3.conf"
+    [ -f "$_srcroot/LICENSE" ] && install -m644 "$_srcroot/LICENSE" "$pkgdir/usr/share/licenses/meat3/LICENSE" || true
+}

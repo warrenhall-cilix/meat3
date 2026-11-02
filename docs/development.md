@@ -119,6 +119,14 @@ These are in addition to [PROTOCOL.md](../PROTOCOL.md):
 - Connections stay open across requests, and several clients can be connected at once.
 - Sensor ids and their order are stable; the tree adds rows in first-seen order.
 
+## Releases
+
+Versions are `vX.Y.Z` tags. `tools/release.sh 0.2.1` bumps `meat3/__init__.py` and the PKGBUILD,
+commits, tags and pushes; the `release` workflow then runs the tests on Arch, builds the package,
+attaches it to a GitHub release and refreshes the pacman repository on the `gh-pages` branch
+(`docs/install.md` has the user side). Between tags, `git describe --tags` is the version string
+the daemon and the installer record.
+
 ## Commits
 
 Run the tests before pushing. The update buttons pull with `--ff-only`, so never rewrite history

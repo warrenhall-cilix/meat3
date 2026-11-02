@@ -1,0 +1,48 @@
+# On every v* tag: build the Arch package, publish it as a GitHub release asset and refresh the pacman
+# repository on the gh-pages branch (https://warrenhall-cilix.github.io/meat3/arch/).
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+  pages: write
+jobs:
+  arch:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+      options: --user root
+    steps:
+      - run: pacman -Syu --noconfirm git python sudo
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - name: tests
+        run: python -m unittest discover -s tests -p 'test_*.py'
+      - name: build package
+        run: |
+          useradd -m build && chown -R build "$GITHUB_WORKSPACE"
+          cd packaging/arch
+          sudo -u build makepkg -f --noconfirm
+          ls -la *.pkg.tar.zst
+      - name: fetch current repository
+        run: |
+          git fetch origin gh-pages:gh-pages || true
+          mkdir -p repo
+          git --work-tree=repo checkout gh-pages -- arch 2>/dev/null || mkdir -p repo/arch
+      - name: add package to the repository
+        run: |
+          cp packaging/arch/*.pkg.tar.zst repo/arch/
+          cd repo/arch && repo-add -R meat3.db.tar.gz *.pkg.tar.zst
+          ls -la
+      - name: publish repository (gh-pages)
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./repo
+          keep_files: true
+      - name: GitHub release with the package attached
+        uses: softprops/action-gh-release@v2
+        with:
+          files: packaging/arch/*.pkg.tar.zst
+          generate_release_notes: true

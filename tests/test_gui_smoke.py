@@ -585,10 +585,10 @@ def _exercise(app, w, tmp, sock, osd_file, mock):
     _wait(app, lambda: "background_alpha=0.8" in (tmp / "mh.conf").read_text(), 5, "MangoHud follows opacity")
     txt = (tmp / "mh.conf").read_text()
     assert "background_color=" in txt and f"font_size={w.osd.mh_size.value()}" in txt
-    assert w.upd_btn.text() == "⬆ 2 updates available", w.upd_btn.text()
+    assert w.upd_btn.text() == "⬆ v9.9.9 available", w.upd_btn.text()      # mockd reports a release tag
     w.show_updates()
     dlg = w._upd_dlg
-    _wait(app, lambda: "2 updates available" in dlg.head.text(), 5, "update dialog status")
+    _wait(app, lambda: "Release v9.9.9 available" in dlg.head.text(), 5, "update dialog names the release")
     assert "mock change one" in dlg.text.toPlainText()
     assert dlg.btn_update.isEnabled()
     dlg.btn_update.click()

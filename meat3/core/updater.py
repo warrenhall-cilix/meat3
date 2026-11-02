@@ -38,7 +38,8 @@ class Updater:
         self.prefix, self.run, self.log_path = prefix, run, log_path
         self.lock = threading.Lock()
         self.checking = False
-        self.state: dict = {"checked": 0.0, "behind": None, "commits": [], "error": ""}
+        self.state: dict = {"checked": 0.0, "behind": None, "commits": [], "error": "", "releases": [],
+                            "current_release": ""}
 
     # ------------------------------------------------------------------ source checkout
     def _read(self, name: str) -> str:
@@ -88,7 +89,7 @@ class Updater:
             t.join()
 
     def _check(self) -> None:
-        st = {"checked": time.time(), "behind": None, "commits": [], "error": ""}
+        st = {"checked": time.time(), "behind": None, "commits": [], "error": "", "releases": [], "current_release": ""}
         try:
             src, owner, err = self.source()
             if err:
@@ -104,6 +105,12 @@ class Updater:
                 return
             commits = [ln for ln in out.splitlines() if ln.strip()]
             st["behind"], st["commits"] = len(commits), commits[:30]
+            # release tags on the upstream side of HEAD: the dialog leads with "release vX.Y.Z available"
+            rc, tags = self._git(src, owner, "tag", "--merged", "@{u}", "--no-merged", "HEAD", "--list", "v*",
+                                 "--sort=-v:refname")
+            st["releases"] = [t.strip() for t in tags.splitlines() if t.strip()] if rc == 0 else []
+            rc, cur = self._git(src, owner, "describe", "--tags", "--abbrev=0", "--match", "v*")
+            st["current_release"] = cur.strip() if rc == 0 else ""
         finally:
             with self.lock:
                 self.state, self.checking = st, False

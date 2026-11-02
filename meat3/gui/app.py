@@ -290,7 +290,9 @@ class MainWindow(QMainWindow):
                                              and inst != self.started_version and not u.get("running")))
             n = u.get("behind") if u.get("ok") else None
             busy = u.get("ok") and u.get("running")
-            self.upd_btn.setText("⬆ updating…" if busy else f"⬆ {n} update{'s' * (n != 1)} available" if n else "")
+            rel = (u.get("releases") or [None])[0] if u.get("ok") else None
+            self.upd_btn.setText("⬆ updating…" if busy else f"⬆ {rel} available" if rel else
+                                 f"⬆ {n} update{'s' * (n != 1)} available" if n else "")
             self.upd_btn.setVisible(bool(busy or n))
         if self.link.is_connected:
             self.link.request({"cmd": "update_status"}, done)
@@ -433,7 +435,8 @@ def single_instance(socket_path: str):
     """One window per user and daemon socket. A second launch asks the first to show itself and exits.
     Returns the listening QLocalServer, or None when an existing window took the request."""
     from PySide6.QtNetwork import QLocalServer, QLocalSocket
-    name = f"meat3-gui-{os.getuid()}-{abs(hash(socket_path)) % 100000}"
+    import hashlib
+    name = f"meat3-gui-{os.getuid()}-{hashlib.sha1(socket_path.encode()).hexdigest()[:8]}"   # str hash is per-process
     probe = QLocalSocket()
     probe.connectToServer(name)
     if probe.waitForConnected(300):

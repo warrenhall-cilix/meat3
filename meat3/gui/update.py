@@ -93,7 +93,12 @@ class UpdateDialog(QDialog):
             self.head.setText(f"Installed {inst}. <b>Can't check for updates:</b> {html.escape(u['error'])}")
         elif u.get("behind"):
             who = "" if u.get("can_update") else " (only the owner of the meat³ git checkout can install them)"
-            self.head.setText(f"Installed {inst}. <b>{u['behind']} update{'s' * (u['behind'] != 1)} available</b>{who}:")
+            rel = u.get("releases") or []
+            if rel:
+                self.head.setText(f"Installed {inst}. <b>Release {html.escape(rel[0])} available</b>"
+                                  f" ({u['behind']} commit{'s' * (u['behind'] != 1)}){who}:")
+            else:
+                self.head.setText(f"Installed {inst}. <b>{u['behind']} update{'s' * (u['behind'] != 1)} available</b>{who}:")
             self.text.setPlainText("\n".join(u.get("commits") or []))
         elif u.get("behind") == 0:
             self.head.setText(f"Installed {inst}. <b>Up to date.</b>")

@@ -1,0 +1,21 @@
+post_install() {
+    getent group meat3 >/dev/null || groupadd --system meat3
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    echo ":: meat3: add yourself to the 'meat3' group (usermod -aG meat3 \$USER), log out and in,"
+    echo "   then: systemctl enable --now meat3d && meat3"
+    echo ":: RDNA4 hidden metrics: dkms install meat3_smu/0.1 (needs dkms and your kernel headers)"
+}
+
+post_upgrade() {
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    if systemctl is-active --quiet meat3d; then
+        systemctl restart meat3d                  # a running daemon keeps old code
+    fi
+    if systemctl is-active --quiet meat3-web; then
+        systemctl restart meat3-web
+    fi
+}
+
+pre_remove() {
+    systemctl disable --now meat3d meat3-web >/dev/null 2>&1 || true
+}

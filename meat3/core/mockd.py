@@ -955,7 +955,8 @@ class MockDaemon:
         if cmd == "update_status":
             return {"ok": True, "installed": "mock", "behind": 2, "checking": False, "running": False,
                     "commits": ["abc1234 mock change one", "def5678 mock change two"], "log": [],
-                    "error": "", "checked": time.time(), "can_update": True}
+                    "error": "", "checked": time.time(), "can_update": True, "releases": ["v9.9.9"],
+                    "current_release": "v0.2.0"}
         if cmd == "update_check":
             return {"ok": True}
         if cmd == "update_start":
