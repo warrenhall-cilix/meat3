@@ -106,6 +106,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.osd, "OSD")
         self.experimental = ExperimentalPage(self.link)
         self.tabs.addTab(self.experimental, "Experimental")
+        self.experimental.accepted_changed.connect(self.overclock.set_experimental)
         v.addWidget(self.tabs, 1)
         self.setCentralWidget(central)
 
@@ -326,6 +327,7 @@ class MainWindow(QMainWindow):
         self.conn_lbl.setStyleSheet(f"color:{theme().green.name()}")
         self.statusBar().showMessage("Connected to daemon", 4000)
         QTimer.singleShot(1500, self._poll_updates)
+        QTimer.singleShot(500, self.experimental.poll_once)
 
     def _on_disconnected(self, why: str):
         self.banner.show_error(self.socket_path, why)
@@ -427,6 +429,25 @@ class MainWindow(QMainWindow):
         QApplication.quit()
 
 
+def single_instance(socket_path: str):
+    """One window per user and daemon socket. A second launch asks the first to show itself and exits.
+    Returns the listening QLocalServer, or None when an existing window took the request."""
+    from PySide6.QtNetwork import QLocalServer, QLocalSocket
+    name = f"meat3-gui-{os.getuid()}-{abs(hash(socket_path)) % 100000}"
+    probe = QLocalSocket()
+    probe.connectToServer(name)
+    if probe.waitForConnected(300):
+        probe.write(b"show\n")
+        probe.waitForBytesWritten(300)
+        probe.disconnectFromServer()
+        return None
+    QLocalServer.removeServer(name)       # a stale socket from a crashed window
+    srv = QLocalServer()
+    if not srv.listen(name):
+        return srv                        # cannot listen (odd platform): run anyway, just without the guard
+    return srv
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(prog="meat3.gui", description="meat³ GUI")
     ap.add_argument("--socket", default=default_socket_path(),
@@ -442,6 +463,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     QApplication.setDesktopFileName("meat3")
     app = QApplication.instance() or QApplication([sys.argv[0]] + qt_args)
     install_none_refcount_guard()
+    server = single_instance(args.socket)
+    if server is None:
+        return 0                          # an earlier window took the request and raised itself
     app.setWindowIcon(app_icon())
     app.setQuitOnLastWindowClosed(False)
     st = settings()
@@ -453,6 +477,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     apply_theme(name)
     w = MainWindow(args.socket, name)
     w.start()
+    if server is not None:
+        def _raise_existing():
+            conn = server.nextPendingConnection()
+            if conn is not None:
+                conn.close()
+            w.showNormal()
+            w.raise_()
+            w.activateWindow()
+        server.newConnection.connect(_raise_existing)
     if not (args.hidden and w.tray is not None):
         w.show()
     if w.tray is None:

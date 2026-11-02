@@ -43,6 +43,7 @@ class Control:
     danger: int = 0         # 0 safe, 1 caution, 2 dangerous (GUI shows warning colours)
     hint: str = ""
     available: bool = True  # False => shown greyed out with `hint` explaining why
+    experimental: bool = False  # hidden by the GUI until the Experimental notice has been accepted
 
     def to_dict(self) -> dict:
         return asdict(self)

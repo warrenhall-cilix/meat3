@@ -87,7 +87,7 @@ def _run(tmp: Path, sock: str, osd_file: str, mock):
 def _exercise(app, w, tmp, sock, osd_file, mock):
     from PySide6.QtCore import QPointF
     from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPixmap
-    from PySide6.QtWidgets import QAbstractItemView
+    from PySide6.QtWidgets import QAbstractItemView, QToolButton
 
     from meat3.gui.sensors import SENSOR_ID_ROLE
     SHOTS.mkdir(parents=True, exist_ok=True)
@@ -276,6 +276,16 @@ def _exercise(app, w, tmp, sock, osd_file, mock):
     _wait(app, lambda: "nv0.oc.core_offset" in oc.rows, 5, "OC rows")
     assert set(oc.boxes) == {"GPU 0: NVIDIA GeForce RTX 5080", "GPU 1: AMD Radeon RX 9070 XT",
                              "CPU: AMD Ryzen 7 9800X3D", "Board: ASUS ROG STRIX X870E-E"}
+    # experimental controls stay hidden until the notice is accepted; fan controls sit in their own section
+    assert "nv0.oc.msvdd_offset" not in oc.rows and "nv0.oc.fan_speed" in oc.rows
+    assert ("GPU 0: NVIDIA GeForce RTX 5080", "Fans") in oc.sections and ("GPU 0: NVIDIA GeForce RTX 5080", "") in oc.sections
+    fans_body = oc.sections[("GPU 0: NVIDIA GeForce RTX 5080", "Fans")]
+    assert fans_body.isVisibleTo(oc)
+    fold_btn = next(b for b in fans_body.parent().findChildren(QToolButton) if b.text() == "Fans")
+    fold_btn.click()
+    assert not fans_body.isVisibleTo(oc)
+    fold_btn.click()
+    assert fans_body.isVisibleTo(oc)
     row = oc.rows["nv0.oc.core_offset"]
     row.set_value(150)
     assert row.dirty() and oc.btn_apply_all.isEnabled()
@@ -594,6 +604,7 @@ def _exercise(app, w, tmp, sock, osd_file, mock):
     assert x.btn_enable.isEnabled()
     x.btn_enable.click()
     _wait(app, lambda: x.stack.currentIndex() == 1, 5, "experimental page unlocked")
+    _wait(app, lambda: "nv0.oc.msvdd_offset" in w.overclock.rows, 5, "experimental control shown once accepted")
     _wait(app, lambda: x.guards.rowCount() >= 9, 5, "guard table filled")
     _pump(app, 0.3)
     w.grab().save(str(SHOTS / "experimental-dark.png"))
@@ -623,6 +634,17 @@ def _exercise(app, w, tmp, sock, osd_file, mock):
     assert "known-good" in x.fw_status.text()
     x.btn_disable.click()
     _wait(app, lambda: x.stack.currentIndex() == 0, 5, "notice back after disabling")
+    _wait(app, lambda: "nv0.oc.msvdd_offset" not in w.overclock.rows, 5, "experimental control hidden again")
+
+    # --- single instance: a second launch asks the first window to show itself and gets None back
+    from meat3.gui.app import single_instance
+    srv = single_instance(sock)
+    assert srv is not None and srv.isListening()
+    raised = []
+    srv.newConnection.connect(lambda: raised.append(1))
+    assert single_instance(sock) is None
+    _wait(app, lambda: raised, 5, "existing window asked to raise")
+    srv.close()
     w.tabs.setCurrentIndex(0)
 
     # --- daemon goes away: banner, '—'-safe, and recovery

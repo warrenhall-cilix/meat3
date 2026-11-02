@@ -9,7 +9,7 @@ from __future__ import annotations
 import html
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
                                QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QStackedWidget, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget)
@@ -44,8 +44,11 @@ def _unit_for(sensor: str) -> str:
 
 
 class ExperimentalPage(QWidget):
+    accepted_changed = Signal(bool)           # the notice was accepted / withdrawn on this machine
+
     def __init__(self, link, parent=None):
         super().__init__(parent)
+        self._accepted: Optional[bool] = None
         self.link = link
         self.state: dict = {}
         self.loaded = False
@@ -209,6 +212,11 @@ class ExperimentalPage(QWidget):
         return area
 
     # ---------------------------------------------------------------- daemon I/O
+    def poll_once(self) -> None:
+        """One state read while the tab is hidden: the Overclock tab needs to know whether experimental controls
+        may be shown before the user ever visits this page."""
+        self.refresh()
+
     def showEvent(self, e):
         super().showEvent(e)
         self.refresh()
@@ -230,6 +238,10 @@ class ExperimentalPage(QWidget):
             return
         self.state = r
         self.can_write = bool(r.get("can_write", True))
+        acc = bool(r.get("accepted"))
+        if acc != self._accepted:
+            self._accepted = acc
+            self.accepted_changed.emit(acc)
         if not r.get("accepted"):
             self.stack.setCurrentIndex(0)
             self.btn_enable.setEnabled(self.chk_understand.isChecked() and self.can_write)

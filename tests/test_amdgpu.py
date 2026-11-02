@@ -450,6 +450,7 @@ class TestRx9070xtOverclock(TreeCase):
         c = self.ctl("clock_pin")
         self.assertTrue(c.available, c.hint)
         self.assertEqual((c.min, c.max, c.value, c.unit), (0, 2970, 0, "MHz"))            # labelled DPM max = game clock
+        self.assertTrue(c.experimental)                                                    # hidden until the notice is accepted
         self.assertIn("game clock", c.hint)
         self.assertFalse(self.be.apply("amdgpu0.oc.clock_pin", 3300)[0])                 # above the stock bound
         self.assertFalse(self.be.apply("amdgpu0.oc.clock_pin", 100)[0])                  # below the DPM minimum

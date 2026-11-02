@@ -914,6 +914,7 @@ class AmdGpuBackend(Backend):
                                   available=w_ok and bool(levels)),
                           {"type": "clock_pin", "path": pin_path, "lo": lo, "hi": hi,
                            "level_path": os.path.join(self.dev, "power_dpm_force_performance_level")}))
+            specs[-1][0].experimental = True
 
         prof_path = os.path.join(self.dev, "pp_power_profile_mode")
         if os.path.exists(prof_path):
@@ -959,7 +960,8 @@ class AmdGpuBackend(Backend):
             if kind == "bool":
                 val = None if val is None else bool(val)
                 dflt = None if dflt is None else bool(dflt)
-            specs.append((Control(f"{P}.oc.od.{prm.key}", G, prm.label + " (OD)", kind, value=val,
+            grp = f"{G}/Fans" if prm.file.startswith(odm.FAN_DIR) else G
+            specs.append((Control(f"{P}.oc.od.{prm.key}", grp, prm.label + " (OD)", kind, value=val,
                                   min=prm.min, max=prm.max, step=1 if kind == "int" else None,
                                   unit=prm.unit, default=dflt, danger=prm.danger, hint=hint.strip(),
                                   available=avail),
@@ -1263,6 +1265,8 @@ class AmdGpuBackend(Backend):
                        "stock gains when meat3d stops."),
                Control(f"{P}.vrm.gains_reset", G, "Restore stock TBP/TDC gains and droop", "action", danger=1,
                        available=bool(ok), hint=why or "writes the backed-up stock gains and IDROOP back to the controllers")]
+        for c in out:
+            c.experimental = True          # hidden in the GUI until the Experimental notice is accepted
         return out
 
     def _vrm_apply(self, control_id: str, value: Any) -> tuple[bool, str]:

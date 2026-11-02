@@ -9,13 +9,13 @@ from typing import Any, Callable, Optional
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFontMetrics, QTextCharFormat, QTextCursor
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QGridLayout,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QGridLayout, QToolButton,
                                QHBoxLayout, QInputDialog, QLabel, QMessageBox, QPlainTextEdit,
                                QPushButton, QScrollArea, QSlider, QSpinBox, QVBoxLayout,
                                QWidget)
 
 from meat3.core.fmt import NONE_TEXT
-from meat3.gui.common import config_dir, device_badge, mono_font, theme
+from meat3.gui.common import config_dir, device_badge, mono_font, settings, theme
 from meat3.gui.curve import CurveEditor
 from meat3.gui.stress import StressDialog
 
@@ -333,6 +333,8 @@ class OverclockPage(QWidget):
         self.rows: dict[str, ControlRow] = {}
         self.boxes: dict[str, QFrame] = {}
         self.infos: dict[str, QLabel] = {}
+        self.sections: dict[tuple[str, str], QWidget] = {}     # (device, section) -> collapsible body
+        self.experimental_enabled = False                        # set from the Experimental tab's state
         self.signature: tuple = ()
         self.stress_dlg: Optional[StressDialog] = None
         self.confirm: Callable[[str, str], bool] = self._confirm_dialog
@@ -395,8 +397,19 @@ class OverclockPage(QWidget):
         self.on_row_edited()
 
     # building --------------------------------------------------------
+    def set_experimental(self, enabled: bool) -> None:
+        """Controls flagged experimental by the daemon (regulator writes, clock pin, ...) stay out of the page
+        until the Experimental tab's notice has been accepted on this machine."""
+        if bool(enabled) != self.experimental_enabled:
+            self.experimental_enabled = bool(enabled)
+            self.signature = ()
+            self.refresh()
+
+    def visible_controls(self) -> list[dict]:
+        return [c for c in self.store.controls if self.experimental_enabled or not c.get("experimental")]
+
     def refresh(self):
-        ctrls = self.store.controls
+        ctrls = self.visible_controls()
         sig = tuple((c.get("id"), c.get("kind"), c.get("group"), tuple(c.get("choices") or ()),
                      c.get("min"), c.get("max"), c.get("step")) for c in ctrls)
         if sig != self.signature:
@@ -421,10 +434,12 @@ class OverclockPage(QWidget):
         self.rows.clear()
         self.boxes.clear()
         self.infos.clear()
+        self.sections.clear()
         by_dev: dict[str, list[dict]] = {}
         for c in ctrls:
             by_dev.setdefault((c.get("group") or "Other").split("/")[0], []).append(c)
         self.empty.setVisible(not by_dev)
+        st = settings()
         for i, (dev, cs) in enumerate(by_dev.items()):
             box = QFrame()
             box.setObjectName("card")
@@ -434,6 +449,11 @@ class OverclockPage(QWidget):
             head = QHBoxLayout()
             head.setSpacing(8)
             kind = "cpu" if dev.lower().startswith("cpu") else "gpu" if dev.lower().startswith("gpu") else ""
+            fold = QToolButton()                      # the whole card folds: one click hides a device you are not tuning
+            fold.setArrowType(Qt.DownArrow)
+            fold.setAutoRaise(True)
+            fold.setToolTip("Collapse / expand this device")
+            head.addWidget(fold)
             badge = QLabel()
             badge.setPixmap(device_badge(dev, kind).pixmap(14, 14))
             head.addWidget(badge)
@@ -461,20 +481,56 @@ class OverclockPage(QWidget):
             line.setFrameShape(QFrame.HLine)
             line.setStyleSheet(f"color:{theme().border.name()}")
             outer.addWidget(line)
-            grid = QGridLayout()
-            grid.setHorizontalSpacing(12)
-            grid.setVerticalSpacing(6)
-            grid.setColumnStretch(1, 1)
-            for r, c in enumerate(cs):
-                row = ControlRow(self, c, grid, r)
-                self.rows[c["id"]] = row
-                if c["id"] in pending:
-                    row.set_value(pending[c["id"]], user=True)
-            outer.addLayout(grid)
+            body = QWidget()
+            bl = QVBoxLayout(body)
+            bl.setContentsMargins(0, 0, 0, 0)
+            bl.setSpacing(6)
+            # sections: the group's second path element ("GPU 0/Fans"); the unnamed one comes first, headless
+            by_sec: dict[str, list[dict]] = {}
+            for c in cs:
+                parts = (c.get("group") or "").split("/", 1)
+                by_sec.setdefault(parts[1] if len(parts) > 1 else "", []).append(c)
+            for sec in sorted(by_sec, key=lambda k: (k != "", k)):
+                sec_body = QWidget()
+                grid = QGridLayout(sec_body)
+                grid.setContentsMargins(0, 0, 0, 0)
+                grid.setHorizontalSpacing(12)
+                grid.setVerticalSpacing(6)
+                grid.setColumnStretch(1, 1)
+                for r, c in enumerate(by_sec[sec]):
+                    row = ControlRow(self, c, grid, r)
+                    self.rows[c["id"]] = row
+                    if c["id"] in pending:
+                        row.set_value(pending[c["id"]], user=True)
+                if sec:
+                    sb = QToolButton()
+                    sb.setText(sec)
+                    sb.setAutoRaise(True)
+                    sb.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+                    sb.setArrowType(Qt.DownArrow)
+                    sb.setToolTip(f"Collapse / expand {sec}")
+                    bl.addWidget(sb)
+                    key = f"overclock/collapsed/{dev}/{sec}"
+                    self._bind_fold(sb, sec_body, key, st)
+                self.sections[(dev, sec)] = sec_body
+                bl.addWidget(sec_body)
+            outer.addWidget(body)
+            self._bind_fold(fold, body, f"overclock/collapsed/{dev}", st)
             box.setProperty("device", dev)
             self.boxes[dev] = box
             self.vbox.insertWidget(self.vbox.count() - 1, box)
         self.on_row_edited()
+
+    @staticmethod
+    def _bind_fold(btn: QToolButton, body: QWidget, key: str, st) -> None:
+        """Arrow button folds `body`; the state is remembered per device and section in the GUI settings."""
+        def apply(collapsed: bool, save: bool = True):
+            body.setVisible(not collapsed)
+            btn.setArrowType(Qt.RightArrow if collapsed else Qt.DownArrow)
+            if save:
+                st.setValue(key, collapsed)
+        apply(str(st.value(key, "false")).lower() in ("true", "1"), save=False)
+        btn.clicked.connect(lambda _=False: apply(body.isVisible()))
 
     @staticmethod
     def _device_info(cs: list[dict]) -> str:
