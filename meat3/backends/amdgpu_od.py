@@ -175,15 +175,20 @@ def build_fan_params(texts: dict[str, str]) -> list[OdParam]:
         od = parse_od_text(curve)
         tlo, thi = od["ranges"].get("FAN_CURVE(hotspot temp)", (None, None))
         plo, phi = od["ranges"].get("FAN_CURVE(fan speed)", (None, None))
+        # a curve of "0C 0%" at every point is what boards without fans (water blocks) and some RDNA3 boards
+        # report: nothing to edit, and the zeros sit below every range so an editor could never show them
+        no_fan = bool(od["fan_points"]) and all(t == 0 and p == 0 for t, p in od["fan_points"].values())
+        no_fan_hint = (" The fan curve reads 0 °C / 0 % speed at every point: no fan on this board (water block) "
+                       "or fan control not exposed; nothing to apply." if no_fan else "")
         for idx, (t, p) in sorted(od["fan_points"].items()):
             params.append(OdParam(f"fan_curve{idx}_temp", f"Fan curve point {idx} temperature", "°C",
                                   f"{FAN_DIR}/fan_curve", t, tlo, thi, str(idx) + " {v} {pwm}",
-                                  danger=1, extra={"pwm": p, "pair": "pwm"},
-                                  hint="OD_FAN_CURVE (hotspot temperature axis)"))
+                                  danger=1, extra={"pwm": p, "pair": "pwm"}, available=not no_fan,
+                                  hint="OD_FAN_CURVE (hotspot temperature axis)" + no_fan_hint))
             params.append(OdParam(f"fan_curve{idx}_pwm", f"Fan curve point {idx} speed", "%",
                                   f"{FAN_DIR}/fan_curve", p, plo, phi, str(idx) + " {temp} {v}",
-                                  danger=1, extra={"temp": t, "pair": "temp"},
-                                  hint="OD_FAN_CURVE (fan speed axis)"))
+                                  danger=1, extra={"temp": t, "pair": "temp"}, available=not no_fan,
+                                  hint="OD_FAN_CURVE (fan speed axis)" + no_fan_hint))
     for fname, sec, rkey, key, label, unit, kind, danger in FAN_SINGLE_FILES:
         txt = texts.get(fname)
         if not txt:

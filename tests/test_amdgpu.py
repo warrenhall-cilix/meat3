@@ -505,6 +505,19 @@ class TestRx9070xtOverclock(TreeCase):
             (fc + "fan_zero_rpm_enable", "0\n"), (fc + "fan_zero_rpm_enable", "c\n"),
             (fc + "fan_target_temperature", "80\n"), (fc + "fan_target_temperature", "c\n")])
 
+    def test_zero_fan_curve_means_no_fan_controls_offered(self):
+        # water-blocked boards report "0C 0%" at every point: below every range, so the GUI would show them as
+        # pending edits (clamped to the minimum). They are unavailable with the reason in the hint instead.
+        p = os.path.join(self.root, DEV.lstrip("/"), "gpu_od/fan_ctrl/fan_curve")
+        with open(p, "w") as fh:
+            fh.write("OD_FAN_CURVE:\n" + "".join(f"{i}: 0C 0%\n" for i in range(5)) +
+                     "OD_RANGE:\nFAN_CURVE(hotspot temp): 25C 110C\nFAN_CURVE(fan speed): 15% 100%\n")
+        fan = [c for c in self.be.controls() if "fan_curve" in c.id]
+        self.assertEqual(len(fan), 10)
+        self.assertTrue(all(not c.available for c in fan))
+        self.assertIn("no fan on this board", fan[0].hint)
+        self.assertTrue(self.ctl("od.fan_target_temp").available)          # the single-value fan files still are
+
     def test_fan_point_with_invalid_companion_refused(self):
         p = os.path.join(self.root, DEV.lstrip("/"), "gpu_od/fan_ctrl/fan_curve")
         with open(p, "w") as fh:   # boot table all zeros, as some RDNA3 boards report

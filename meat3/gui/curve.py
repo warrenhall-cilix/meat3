@@ -55,7 +55,14 @@ class CurvePlot(QWidget):
         v = c.get("value") or {}
         pts = list(v.get("points") or [])
         same_shape = len(pts) == len(self.points) and all(p["i"] == q["i"] for p, q in zip(pts, self.points))
+        # a measured curve gains bins between polls: keep the selection on the same bin (by its id), and drop a
+        # hover index that no longer points at anything, so the readout does not jump or vanish each poll
+        sel_id = self.points[self.sel]["i"] if self.sel is not None and self.sel < len(self.points) else None
         self.points = pts
+        if sel_id is not None:
+            self.sel = next((k for k, q in enumerate(pts) if q.get("i") == sel_id), None)
+        if self.hover is not None and self.hover >= len(pts):
+            self.hover = None
         self.mode = v.get("mode") or "delta"
         lk = v.get("lock") or {}
         self.lo, self.hi = lk.get("min"), lk.get("max")
@@ -64,8 +71,6 @@ class CurvePlot(QWidget):
             self.edit = [float(p.get("mhz") or 0) for p in self.points]
             self.edit_mv = [float(p.get("mv") or 0) for p in self.points]
             self.touched = False
-        if self.sel is not None and self.sel >= len(self.points):
-            self.sel = None
         self.update()
 
     @property
@@ -347,6 +352,8 @@ class CurvePlot(QWidget):
             p.drawEllipse(pt, rad, rad)
         # readout
         k = self.sel if self.sel is not None else self.hover
+        if k is not None and k >= len(self.points):
+            k = None
         if k is not None:
             q = self.points[k]
             mv = self.edit_mv[k] if self.mode == "absolute" else float(q.get("mv") or 0)
@@ -427,8 +434,8 @@ class CurveEditor(QWidget):
             self.sel_spin.setEnabled(False)
             self.sel_label.setText("select a point")
         ro = self.plot.readonly
-        for w in (self.sel_spin, self.btn_flat, self.off_spin, self.btn_off, self.btn_reset):
-            w.setVisible(not ro)
+        for w in (self.sel_label, self.sel_spin, self.btn_flat, self.off_spin, self.btn_off, self.btn_reset):
+            w.setVisible(not ro)             # a measured curve has its readout inside the plot; no editing bar
         self.btn_flat.setEnabled(k is not None)
         self.btn_stock.setVisible(self.plot.mode == "delta")
         self.edited.emit()

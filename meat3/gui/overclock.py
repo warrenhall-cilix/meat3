@@ -204,6 +204,8 @@ class ControlRow:
             name = f"<span style='color:{t.amber.name()}'>{name}</span>"
         else:
             badge = "<span style='color:transparent'>⚠ </span>"
+        if not self.c.get("available", True) and self.kind != "curve":
+            name += f" <span style='color:{t.dim.name()}'>(not available)</span>"
         self.label.setText(badge + name)
 
     def _slider_moved(self, pos: int):
@@ -238,7 +240,11 @@ class ControlRow:
             return self.curve.value()
         return True
 
-    def set_value(self, v: Any) -> None:
+    def set_value(self, v: Any, user: bool = False) -> None:
+        """Put `v` in the editor. user=True for values the user chose (profile, reset, a pending edit kept across
+        a rebuild): those count as edits. Values that merely mirror the hardware never do, so a control whose
+        hardware value sits outside the editor's range (a fan curve of zeros on a board without fans) is not
+        reported as a pending change."""
         if v is None:
             return
         self._sync = True
@@ -260,21 +266,27 @@ class ControlRow:
                 self.check.setChecked(bool(v))
         finally:
             self._sync = False
-        self._edited()
+        if user:
+            self._touched = True
+        self._refresh_mark()
 
     def dirty(self) -> bool:
         if self.kind == "action" or not self.c.get("available", True):
             return False
         if self.curve is not None:
             return self.curve.dirty()
-        if self.c.get("value") is None and not getattr(self, "_touched", False):
+        if not getattr(self, "_touched", False):
             return False
         return not values_equal(self.c, self.value(), self.c.get("value"))
 
     def _edited(self):
+        """A widget signal: the user changed something."""
         if self._sync:
             return
         self._touched = True
+        self._refresh_mark()
+
+    def _refresh_mark(self):
         d = self.dirty()
         self.mark.setText("●" if d else "")
         self.mark.setStyleSheet(f"color:{theme().accent.name()}")
@@ -288,13 +300,14 @@ class ControlRow:
         self._render_label()
         self.label.setToolTip(c.get("hint") or "")
         self.hint.setText(c.get("hint") or "")
-        self.hint.setVisible(not avail and bool(c.get("hint")))
+        self.hint.setVisible(False)             # hints live in the tooltip (hover the label), never inline
+        if self.editor is not None:
+            self.editor.setToolTip(c.get("hint") or "")
         measured = self.kind == "curve" and isinstance(c.get("value"), dict) and c["value"].get("mode") == "measured"
         self.editor.setEnabled(avail or measured)   # a measured curve is read-only but still browsable
         self.label.setEnabled(avail or measured)
         if measured:
             self.apply_btn.setVisible(False)
-            self.hint.setVisible(False)
         if self.kind == "action":
             self.current.setText("")
         else:
@@ -456,7 +469,7 @@ class OverclockPage(QWidget):
                 row = ControlRow(self, c, grid, r)
                 self.rows[c["id"]] = row
                 if c["id"] in pending:
-                    row.set_value(pending[c["id"]])
+                    row.set_value(pending[c["id"]], user=True)
             outer.addLayout(grid)
             box.setProperty("device", dev)
             self.boxes[dev] = box
@@ -544,6 +557,7 @@ class OverclockPage(QWidget):
     def revert_all(self):
         for r in self.rows.values():
             if r.dirty():
+                r._touched = False
                 r.set_value(r.c.get("value"))
 
     def reset_device(self, dev: str) -> bool:
@@ -552,7 +566,7 @@ class OverclockPage(QWidget):
                 and r.c.get("available", True) and r.c.get("default") is not None]
         changes = [(r.c, r.c["default"]) for r in rows if not values_equal(r.c, r.c.get("value"), r.c["default"])]
         for r in rows:
-            r.set_value(r.c["default"])
+            r.set_value(r.c["default"], user=True)
         if not changes:
             self._log(None, f"{dev}: already at stock")
             return False
@@ -626,7 +640,7 @@ class OverclockPage(QWidget):
                 continue
             if not r.c.get("available", True):
                 continue
-            r.set_value(v)
+            r.set_value(v, user=True)
             n += r.dirty()
         if data:
             extra = f"; {len(missing)} unknown controls ignored" if missing else ""

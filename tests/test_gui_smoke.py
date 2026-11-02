@@ -335,9 +335,12 @@ def _exercise(app, w, tmp, sock, osd_file, mock):
     assert not mv.dirty() and mv.curve.plot.edit[3] == float(mv.curve.plot.points[3]["mhz"])
     assert not mv.curve.sel_spin.isVisibleTo(oc) and not mv.curve.btn_flat.isVisibleTo(oc)
 
-    # unavailable control is disabled and shows its hint
+    # unavailable control is disabled, says so in its label, and explains why in the tooltip (never inline)
     fan = oc.rows["nv0.oc.fan_speed"]
-    assert not fan.editor.isEnabled() and fan.hint.isVisibleTo(oc) and "manual" in fan.hint.text()
+    assert not fan.editor.isEnabled() and not fan.hint.isVisibleTo(oc)
+    assert "not available" in fan.label.text() and "manual" in fan.label.toolTip() and "manual" in fan.editor.toolTip()
+    # a control whose hardware value the editor cannot show is not a pending change (fan curve of zeros)
+    assert not any(r.dirty() for r in oc.rows.values()), [r.id for r in oc.rows.values() if r.dirty()]
 
     # danger=2 needs confirmation
     asked = []

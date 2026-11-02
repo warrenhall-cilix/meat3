@@ -11,7 +11,7 @@ import re
 from typing import Optional
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QBrush
+from PySide6.QtGui import QFontMetrics, QBrush
 from PySide6.QtWidgets import (QHeaderView, QLabel, QMenu, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
@@ -36,6 +36,22 @@ COLUMNS = [
     ("SMT", ["core{k}.stall_smt"], False),
 ]
 MAX_SUFFIX = " max"
+COLUMN_TIPS = {
+    "Eff clock": "effective clock: cycles actually executed per second (APERF), lower than the active clock when the core idles",
+    "Active": "clock while the core is in C0 (MPERF-based)",
+    "Volt": "voltage the SMU requests for this core",
+    "Temp": "per-core temperature from the PM table",
+    "Power": "per-core power from the PM table",
+    "Usage": "share of time the core was busy",
+    "C0": "time in the active C0 state",
+    "CC6": "time in the deep CC6 sleep state",
+    "Fmax": "the core's fused maximum boost clock",
+    "CPPC": "preferred-core rank (lower = the scheduler prefers it)",
+    "IPC": "instructions per cycle",
+    "Back-end": "pipeline slots stalled waiting on the back end (memory, execution)",
+    "Front-end": "pipeline slots stalled waiting on the front end (fetch, decode)",
+    "SMT": "pipeline slots taken by the sibling thread",
+}
 CORE_RE = re.compile(r"^(?P<p>.+)\.core(?P<k>\d+)\.clk_eff$")
 
 
@@ -111,11 +127,22 @@ class CoresPage(QWidget):
         t.setSelectionMode(QTableWidget.SingleSelection)
         t.setAlternatingRowColors(True)
         t.setFont(mono_font())
-        t.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        hh = t.horizontalHeader()
+        hh.setSectionResizeMode(QHeaderView.Stretch)
+        # columns share the width but never shrink below their own header text: a narrow window gets a
+        # horizontal scrollbar instead of unreadable headers
+        hfm = QFontMetrics(hh.font())
+        hh.setMinimumSectionSize(max(hfm.horizontalAdvance(c[0]) for c in cols) + 14)
+        t.setHorizontalScrollMode(QTableWidget.ScrollPerPixel)
+        for ci, (hdr, src, is_max) in enumerate(cols):
+            it = t.horizontalHeaderItem(ci)
+            if it is not None:
+                it.setToolTip(("Highest value since start of " if is_max else "") + COLUMN_TIPS.get(hdr.replace(MAX_SUFFIX, ""), hdr))
         t.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
         t.setContextMenuPolicy(Qt.CustomContextMenu)
         t.customContextMenuRequested.connect(lambda pos, p=prefix: self._menu(p, pos))
         h = t.horizontalHeader().height() + t.verticalHeader().defaultSectionSize() * len(cores) + 4
+        h += t.horizontalScrollBar().sizeHint().height()      # room for the scrollbar a narrow window needs
         t.setMinimumHeight(h)
         t.setMaximumHeight(h)
         idx = self.lay.count() - 1                      # keep the stretch last
